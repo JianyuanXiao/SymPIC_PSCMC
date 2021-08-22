@@ -1,0 +1,6 @@
+
+(define-scmc-global lhs_eqs_ss_file_name "../slab_norel.ss")
+(define-scmc-global magpush_eqs_ss_file_name "../magpush1st.ss")
+(define-scmc-global use-midp #t)
+(define-scmc-global geo_ 'slab_midp_)
+(input-scmc "../inner_split_pass_kernel_macro.scmc")

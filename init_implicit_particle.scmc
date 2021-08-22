@@ -1,0 +1,117 @@
+;paravec.scmc general_macros.scmc pic_helper.scmc pscmc_config_runtime.ss
+
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(include< "assert.h")
+
+(eval-scmc-global 
+  (begin (load "pscmc_config_runtime.ss") 
+    (load "pic_helper.scmc")
+    
+    '()))
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(include- "genrand.h")
+(include- "cfgcst.h")
+(include- "init_field3d_mpi.h")
+(include- "sync_fields.h")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(eval-scmc-global
+  (begin
+    (multi-define init-fun-implicit call-fun-implicit call-fun-seq-mpi-implicit 
+      (gen-multi-pic-helper-funs 'implicit_kernel 0 '(split_pass_xyzE_particle split_pass_xyzE_particle_push_r) '(()) '(fieldE fieldB FoutJ) '((long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double DELTA_X) (double DELTA_Y) (double DELTA_Z)) '((int* xyzw) (double* cu_cache) (int* cu_xyzw)) 
+	(lambda ()
+	  pic-helper-predef-fix
+	  )
+	(lambda () '())
+	'((double Mass0) (double Charge0 )) 
+	'((double Deltat) (int N_l) (int N_M) (int push_J))
+	'numvec 1
+	))
+    (define (gen-map-mpi-nogrid name para_opc calc_cuload body_opc pre_run_body_mpi para_fmpi call_arg_opc)
+      (define opc_name (concat name '_opc))
+      (define fmpi_name (concat name '_fmpi))
+      `(begin
+	 (defun-class-One_Particle_Collection ,opc_name int ,para_opc ;((int cur_sp) (double VT))
+	   (block
+	     (class-header-One_Particle_Collection pthis)
+	     (class-header-Field3D_Seq pfield)
+	     (define-double* host_data (vrf (type-convert double** cu_cache) 0))
+	     (define-int* cu_xyzw_data (vrf (type-convert int**    cu_xyzw ) 0))
+	     (for-from-zero-to cur_pcid numvec
+	       (define-double* cu_r_0 (+ host_data (* cur_pcid cu_cache_length ,PARTICLE_LEN)))
+	       (define-int* cu_xyzw_0 (+ cu_xyzw_data (* cur_pcid 4)))
+	       (define-int cu_load)
+	       ,calc_cuload ;calc_cuload should set cu_load
+	       (set! (vrf cu_xyzw_0 0) cu_load)
+	       ;(LOG_RECORD_INFO "cu_load=%d" cu_load)
+	       (fffor-xyz-from-zero-to xlen ylen zlen
+		 (define-long offset_grid (+ xyzx (* xlen (+ xyzy (* ylen xyzz)))))
+		 (for-from-zero-to l tgrid_load
+		   (define-double* cu_r_current (+ cu_r_0 (* (+ (* offset_grid tgrid_load) l) ,PARTICLE_LEN)))
+		   ,body_opc)
+		 )
+	       )
+	     )
+	   (return 0)
+	   )
+	 (defun-class-Field3D_MPI ,fmpi_name int ,para_fmpi
+	   ,pre_run_body_mpi
+	   (for-from-zero-to i num_spec
+	     ;(LOG_RECORD_INFO ,(multi-concat "" fmpi_name " i=%d tp=%d\n" ) i (vrf (structp-ref (type-convert Particle_in_Cell_MPI* pthis) o_particle_type) i))
+	     (if (eq? (vrf (structp-ref (type-convert Particle_in_Cell_MPI* pthis) o_particle_type) i) 1)
+	       (for-from-zero-to j num_runtime
+		 (,opc_name (+ (structp-ref pthis particles) (+ (* i num_runtime) j)) . ,call_arg_opc)
+		 ))
+	     )
+	   )
+	 )
+      )
+    `(begin
+       ,(gen-map-mpi-nogrid 'init_dist_particle_nogrid '((int tgrid_load) (double VT) (int fluid_dim)) `(set! cu_load (* tgrid_load xlen ylen zlen))
+	  `(begin 
+	     (vector-set! cu_r_current 0 (+ xyzx 0.5))
+	     (vector-set! cu_r_current 1 (+ xyzy 0.5))
+	     (vector-set! cu_r_current 2 (+ xyzz 0.5))
+	     (vector-set! cu_r_current 3 (maxwell_dist 0 VT))
+	     (vector-set! cu_r_current 4 (maxwell_dist 0 VT))
+	     (vector-set! cu_r_current 5 (maxwell_dist 0 VT))
+	     ;(LOG_RECORD_INFO "fdm=%d\n" fluid_dim)
+	     ;(LOG_RECORD_INFO "gcl=%d ccl=%d\n" grid_cache_len cu_cache_length)
+	     (cond
+	       ((b-and fluid_dim 1)  
+		 (vector-set! cu_r_current 0 (+ (/ (+ l 0.5) tgrid_load) xyzx))
+		 ;(LOG_RECORD_INFO "%e\n" (vrf cu_r_current 0))
+		 ); 2d and 3d are buggy
+	       ((b-and fluid_dim 2)  (vector-set! cu_r_current 1 (+ (/ (+ l 0.5) tgrid_load) xyzy)))
+	       ((b-and fluid_dim 4)  (vector-set! cu_r_current 2 (+ (/ (+ l 0.5) tgrid_load) xyzz)))
+	       (else 0)
+	       )
+	     ;(LOG_RECORD_INFO "[%e %e %e]\n" (vrf cu_r_current 0) (vrf cu_r_current 1) (vrf cu_r_current 2))
+	     )
+	  '() '((int fluid_dim)) `((call_GET_INIT_LOAD i) (call_GET_INIT_VT i) fluid_dim)
+	  )
+       (defun init_implicit_particle int ((One_Particle_Collection* pthis))
+	 (block
+	   (class-header-Field3D_Seq pthis->pfield)
+	   ,(init-fun-implicit)
+	   )
+	 (return 0)
+	 )
+       (defun-class-Field3D_MPI init_implicit_particle_mpi int ()
+	 (for-from-zero-to i num_spec
+	   (for-from-zero-to j num_runtime
+	     (class-header-Field3D_Seq (+ (structp-ref pthis data) j))
+	     (init_implicit_particle (+ (structp-ref pthis particles) (+ (* i num_runtime) j)))
+	     )
+	   )
+	 (return 0)
+	 )
+
+       ,(begin-map call-fun-implicit (map car runtimes))
+       ,(call-fun-seq-mpi-implicit)
+       )
+    )
+  )

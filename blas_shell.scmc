@@ -1,0 +1,338 @@
+;paravec.scmc general_macros.scmc
+
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(include< "assert.h")
+;(include- "c_/c_pscmc_inc.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include- "space_filling_curve.h")
+(include- "mpifields.h")
+
+(define-scmc-global gen-blas-shell
+  (lambda (str-name mpi-str-name fste)
+    (multi-define name fun-proto mpi-protos vec-vars scal-vars pre_exec fste)
+    (define isreduce (isinlst (cadar fun-proto) '(rdcd_max rdcd_sum)))
+    (define rdcvar (if isreduce (cadar fun-proto) 'rdcd))
+
+    (define reduce_op (if isreduce (caar fun-proto) 0))
+    (set! fun-proto (if isreduce (cdr fun-proto) fun-proto))
+    (set! vec-vars (if isreduce (cdr vec-vars) vec-vars))
+    (define mpi-ret-type (if isreduce 'double 'int ))
+    (define reduce_fun
+      (case reduce_op
+	('MPI_MAX 
+	  ;`(set! (vector-ref hdata 0) (if (> (vector-ref hdata i) (vector-ref hdata 0)) (vector-ref hdata i) (vector-ref hdata 0)))
+	  (lambda (a b)
+	    `(set! ,a (if (> ,a ,b) ,a ,b))
+	    )
+	 )
+	('MPI_SUM 
+	  ;`(incf! (vector-ref hdata 0) (vector-ref hdata i))
+	  (lambda (a b)
+	    `(incf! ,a ,b)
+	    )
+	  )
+	(else (lambda x '()))
+	)
+      )
+    ;(write (list isreduce vec-vars) current-error-port) (newline current-error-port)
+    `(begin
+       ,(begin-map
+	  (lambda (rt)
+	    ;(write scal-vars current-error-port)
+	    ;(write vec-vars current-error-port)
+	    ;(newline current-error-port)
+	    `(,(concat 'defun-class- str-name) ,(multi-concat rt name '_ str-name) int ,fun-proto
+	       ,pre_exec
+	       ,(if isreduce
+		  `(,(multi-concat rt name '_scmc_set_parameter_ rdcvar) ,(multi-concat name '_kernel) rdcd) '())
+	       ,(begin-map
+		  (lambda (qv)
+		    (define qvname (car qv))
+		    `(,(multi-concat rt name '_scmc_set_parameter_ qvname) ,(multi-concat name '_kernel) (structp-ref ,qvname main_data))
+		    )
+		  vec-vars
+		  )
+	       ,(with-kernel-parameters-exec rt name scal-vars (concat name '_kernel) 1 'numvec)
+	       ,(if isreduce
+		  `(begin
+		     (,(multi-concat rt 'pscmc_mem_sync_d2h) rdcd)
+		     (define-double* hdata (,(multi-concat rt 'pscmc_get_h_data) rdcd NULL))
+		     (for-from-to i 1 numvec
+		       ,(reduce_fun
+			  `(vector-ref hdata 0)
+			  `(vector-ref hdata i)
+			  )
+		       )
+		     )
+		  '()
+		  )
+	       (return 0)
+	       )
+	    ) 
+	  (map car runtimes)
+	  )
+       (,(concat 'defun-class- str-name) ,(multi-concat name '_ str-name) int ,fun-proto
+	 (return (choose_the_runtime (,(multi-concat name '_ str-name) pthis . ,(map cadr fun-proto))))
+	 )
+       (,(concat 'defun-class- mpi-str-name) ,(multi-concat name '_ mpi-str-name) ,mpi-ret-type ,mpi-protos
+	 (define-int i)
+	 (for i=0 (< i num_runtime) i++
+	   (,(multi-concat name '_ str-name) (+ data i) .
+	     ,(map 
+		(lambda (x) 
+		  (multi-define type name x)
+		  (cond
+		    ((eq? (car type) str-name) `(+ (structp-ref ,name data) i))
+		    (else name)
+		    )
+		  )
+		fun-proto)
+	     )
+	   )
+	 ,(if isreduce
+	    `(begin
+	       (define rds 0.0)
+	       (for-from-to i 0 num_runtime
+		 ,(reduce_fun 'rds `(vector-ref (structp-ref (+ data i) rdcd_host) 0))
+		 )
+	       (define ret 0.)
+	       (MPI_Allreduce ("&" rds) ("&" ret) 1 PS_MPI_DOUBLE ,reduce_op PS_MPI_COMM_WORLD)
+	       (return ret)
+	       )
+	 `(return 0))
+	 )
+       )
+    ) 
+  )
+(eval-scmc-global
+  (begin
+    (define (remove-runtime x)
+      (define lst (string->list (symbol->string x)))
+      (let loop ((lst lst))
+	(cond
+	  ((eq? (car lst) #\_) 
+	    (string->symbol (list->string (cdr lst))))
+	  (else (loop (cdr lst)))
+	  )
+	)
+      )
+    (define fp (open-input-file "miniblas.kernel.def.ss"))
+    (read fp)
+    (define allenv (read fp))
+    ;(write allenv current-error-port) (newline current-error-port)
+    (set! allenv 
+      (map 
+	(lambda (x)
+	  (define (gen-proto-seq vec-vars)
+	    (let loop ((vec-vars vec-vars) (r #t))
+	      (cond
+		((null? vec-vars) '())
+		(else
+		  (define x (car vec-vars))
+		  (multi-define name x)
+		  (case name
+		    ('rdcd_sum (cons (list 'MPI_SUM name) (loop (reverse (cdr vec-vars)) #f)))
+		    ('rdcd_max (cons (list 'MPI_MAX name) (loop (reverse (cdr vec-vars)) #f)))
+		    (else 
+		      (if r
+			(reverse (loop vec-vars #f))
+			(cons (list '(Field3D_Seq *) name) (loop (cdr vec-vars) #f))))
+		    )  
+		  )
+		)
+	      )
+	    )
+	  (define (gen-proto-mpi vec-vars)
+	    (let loop ((vec-vars vec-vars) (r #t))
+	      (cond 
+		((null? vec-vars) '())
+		(else
+		  (define x (car vec-vars))
+		  (multi-define name x)
+		  (case name
+		    ('rdcd_sum (loop (reverse (cdr vec-vars)) #f))
+		    ('rdcd_max (loop (reverse (cdr vec-vars)) #f))
+		    (r (reverse (loop vec-vars #f)))
+		    (else 
+		      (if r
+			(reverse (loop vec-vars #f))
+			(cons (list '(Field3D_MPI *) name) (loop (cdr vec-vars) #f))))
+		    )))
+	      )
+	    )
+	  (define (add-scal-var proto scal-vars)
+	    (define yarg '())
+	    ;(write (cons 'dbg proto) current-error-port) (newline current-error-port)
+	    (define restarg
+	      (let loop ((proto proto))
+		(cond
+		  ((pair? proto) 
+		    (set! yarg (cons (car proto) yarg))
+		    (cond
+		      ((eq? (cadar proto) 'y) (cdr proto))
+		      (else (loop (cdr proto)))
+		      ))
+		  (else '())
+		  )
+		)
+	      )
+	    (set! yarg (reverse yarg))
+	    ;(write yarg current-error-port) (newline current-error-port)
+	    (define fp-scal-vars 
+	      (let loop ((scal-vars scal-vars))
+		(cond
+		  ((pair? scal-vars)
+		    ;(write scal-vars current-error-port) (newline current-error-port)
+		    (cond
+		      ((eq? (caar scal-vars) 'double) (cons (list '(double) (cadar scal-vars)) (loop (cdr scal-vars))))
+		      (else (loop (cdr scal-vars)))
+		      )
+		    )
+		  (else '())
+		  )
+		)
+	      )
+	    (define fp-scal-a-vars '())
+	    (set! fp-scal-vars
+	      (let loop ((fp-scal-vars fp-scal-vars))
+		(cond
+		  ((pair? fp-scal-vars) 
+		    (cond
+		      ((eq? (cadr (car fp-scal-vars)) 'a) 
+			(set! fp-scal-a-vars (cons (car fp-scal-vars) fp-scal-a-vars))
+			(cdr fp-scal-vars)
+			)
+		      (else
+			(cons (car fp-scal-vars) (loop (cdr fp-scal-vars))))
+		      )
+		    )
+		  (else '())
+		  )
+		)
+	      )
+	    ;(write (list yarg fp-scal-a-vars restarg fp-scal-vars) current-error-port) (newline current-error-port)
+	    (append yarg fp-scal-a-vars restarg fp-scal-vars)
+	    )
+	  (multi-define name args x)
+	  (set! name (remove-runtime name))
+	  (multi-define vec-vars scal-vars (get-vec-scal-from-args args))
+	  ;(write (list vec-vars scal-vars) current-error-port) (newline current-error-port)
+	  (define protos (gen-proto-seq vec-vars))
+	  (define mpi-protos (gen-proto-mpi vec-vars))
+	  (set! protos (add-scal-var protos scal-vars))
+	  (set! mpi-protos (add-scal-var mpi-protos scal-vars))
+	  ;(write (list 'fn protos mpi-protos) current-error-port) (newline current-error-port)
+	  (define g (list name protos mpi-protos vec-vars scal-vars '(begin (define-long XLEN xlen) (define-long YLEN ylen) (define-long ZLEN zlen) (define-long y_cpu_core numvec))))
+	  g
+	  )
+	 allenv))
+    `(begin
+       ,(begin-map (lambda (x) (gen-blas-shell 'Field3D_Seq 'Field3D_MPI x)) allenv)
+       )
+    )
+  )
+(defun mpi_init_bicg int ((bicg_space* pthis) (linear_operator_mpi A) (Field3D_MPI* x) (int zmax) (double solve_err) (void* fv))
+  ;(define s (openmp_blas_yiszero_Field3D_Seq NULL NULL))
+  (set-pthis A zmax solve_err fv)
+  (eval-scmc-global
+    (begin-map
+      (lambda (x)
+	`(begin
+	   (set! (structp-ref pthis ,x) (malloc (sizeof Field3D_MPI)))
+	   (init_Field3D_MPI_from (structp-ref pthis ,x) x)
+	   )
+	) '(r1 ti si1 si vi1 pi pi1 ri1 ri r0h)
+      )
+    )
+  (return 0)
+  )
+(defun-class-bicg_space mpi_simple_bicgstab int ((Field3D_MPI* x) (Field3D_MPI* b)) ;the bicgstab method which solves A x=b
+  ;(declare-Field3D_MPI* ri ri1 r0h pi ti pi1 vi1 si)
+  (CG_LINEAR_SETZERO x)
+  (CG_LINEAR_SETZERO vi1)
+  (CG_LINEAR_SETZERO pi)
+  (CG_LINEAR_SETZERO pi1)
+  (CG_LINEAR_YISAX ri1 1 b)
+  (CG_LINEAR_YISAX r0h 1 b)
+  (define-double maxr (CG_LINEAR_FINDMAX r0h))
+  (define rhoi1 1.)
+  (define omgi1 1.)
+  (define alpha 1.)
+  (define-long cur_rank (structp-ref x cur_rank))
+  (LOG_RECORD_INFO "Info: bicgstab: maxb=%e\n" maxr)
+  (define-int z 1)
+  (define-double maxv (CG_LINEAR_FINDMAX ri1))
+  (for 0 (> maxv solve_err) 0
+    ;(LOG_RECORD_INFO "z=%d, maxv=%e\n" z maxv)
+    (if (>= z zmax)
+      break
+      )
+    (define-double rhoi (CG_LINEAR_DOTXY r0h ri1))
+    (define-double beta (runc "rhoi/rhoi1*alpha/omgi1"))
+    (if 0
+      (begin
+	(block
+	  (class-header-Field3D_Seq ri1->data)
+	  (fprintf stderr "b=%e r=%e o=%e\n" beta rhoi omgi1)
+	  (fprintf stderr "xdata=%e\n" (GET_FIELD3D_SEQ ri1->data 0 0 0 0 0))
+	  (fprintf stderr "xdata=%e\n" (GET_FIELD3D_SEQ ri1->data 1 0 0 0 0))
+	  )
+	)
+      )
+    (CG_LINEAR_AXPBY pi1 (- (* beta omgi1)) vi1 beta)
+    (if 0
+      (block
+	(class-header-Field3D_Seq vi1->data)
+	(for-from-zero-to i 8
+	  (fprintf stderr "pi0%d=%e\n" i (GET_FIELD3D_SEQ pi1->data 0 i 0 0 0))
+	  (fprintf stderr "pi1%d=%e\n" i (GET_FIELD3D_SEQ pi1->data 0 i 0 0 1))
+	  (fprintf stderr "vi10%d=%e\n" i (GET_FIELD3D_SEQ ri1->data 0 i 0 0 0))
+	  (fprintf stderr "vi11%d=%e\n" i (GET_FIELD3D_SEQ ri1->data 0 i 0 0 1))
+	  )
+	)
+      )
+    (CG_LINEAR_AXPBY pi1 1 ri1 1)
+    (A vi1 pi1 fv) ;Now pi1 is pi
+
+
+    (define-double cgl (runc "CG_LINEAR_DOTXY(r0h,vi1)"))
+    (if (eq? cgl 0) (incf! cgl))
+
+    (set! alpha (runc "rhoi/cgl"))
+    ;(LOG_RECORD_INFO "rhoi=%e alphamid=%e\n" rhoi alpha)
+
+    (runc "CG_LINEAR_AXPBY(x,alpha,pi1,1)") ;Now x is the h
+
+    (runc "CG_LINEAR_YISAX(si,1,ri1)")
+    (runc "CG_LINEAR_AXPBY(si,-alpha,vi1,1)")
+    (runc "A(ti,si,fv)")
+
+    (set! omgi1 (runc "CG_LINEAR_DOTXY(ti,si)/CG_LINEAR_DOTXY(ti,ti)"))
+
+    (runc "CG_LINEAR_AXPBY(x,omgi1,si,1)") ; x_i=x_(i-1)+alp p_i+omgi si
+
+    (runc "CG_LINEAR_YISAX(pi,alpha,pi1)")
+    (runc "CG_LINEAR_AXPBY(pi,omgi1,si,1)")
+    (runc "CG_LINEAR_YISAX(ri1,1,si)")
+    (runc "CG_LINEAR_AXPBY(ri1,-omgi1,ti,1)")
+    ;(runc "A(pi,x,fv)")
+    ;(CG_LINEAR_AXPY pi -1 b)
+    (set! maxv (runc "CG_LINEAR_FINDMAX(pi)"))
+    ;(LOG_RECORD_INFO "z=%d, maxv=%e\n" z maxv)
+    (set! rhoi1 rhoi)
+    (incf! z)
+    )
+  (A pi x fv)
+  (CG_LINEAR_AXPY pi -1 b)
+  (set! maxr (CG_LINEAR_FINDMAX pi))
+  ;(if (> maxr (* 100 maxv)) (begin (CG_LINEAR_YISAX r0h pi) (CG_LINEAR_YISAX ri1 pi)))
+  (LOG_RECORD_INFO "z=%d, maxv=%e maxr=%e\n" z maxv maxr)
+  ;(if (eq? cur_rank 0) (LOG_RECORD_INFO "z=%d, maxv=%e\n" z maxr))
+  (return z==zmax)
+  )

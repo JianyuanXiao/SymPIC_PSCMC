@@ -1,0 +1,16 @@
+(define-scmc-global USE_VEC #t)
+;(define-scmc-global USE_AVX_INTRIN #t)
+(define-scmc-global USE_INTRIN #t)
+(define-scmc-global SIMD_HEADER "arm_neon.h")
+(define-scmc-global VECLEN (if (and USE_VEC (isinlst RUNTIME '(C OpenMP))) 2 1))
+;(define-scmc-global SIMD_INTRIN_MAP `((double __m128d) (long __m128i) (int __m128i) (size_t __v4du) (set-single _mm128_setr_pd)))
+;(define-scmc-global SIMD_INTRIN_MAP `((double float64x2_t) (long int64x2_t) (int int64x2_t) (size_t uint64x2_t) (set-single _mm_setr_pd) (sqrt _mm_sqrt_pd)))
+;(defun setr_pd inline-static-float64x2_t ((double a) (double b)) (pure-text "\nreturn (float64x2_t){a,b};\n") )
+(pure-text 
+  "\n
+#define setr_pd(a,b) ((float64x2_t){(a),(b)})
+#define sqrt_neon_simd(a) (float64x2_t){sqrt(a[0]),sqrt(a[1])}
+#define floor_neon_simd(a) (float64x2_t){floor(a[0]),floor(a[1])}
+\n")
+(define-scmc-global SIMD_INTRIN_MAP `((double float64x2_t) (long int64x2_t) (int int64x2_t) (size_t uint64x2_t) (sqrt sqrt_neon_simd) (set-single setr_pd) (floor floor_neon_simd)))
+

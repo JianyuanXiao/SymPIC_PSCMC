@@ -1,0 +1,250 @@
+;paravec.scmc general_macros.scmc 
+
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") '()))
+;(include< "unistd.h")
+(include< "stdlib.h")
+(include< "stdio.h")
+(include< "string.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include- "mpifields.h")
+(define-scmc-global once_allinone (if USE-ALL-IN-ONE-SYNC-LAYER 'all_in_one 'once))
+(defmacro USE-A/O (a . o)
+  (set! o (if (null? o) 0 (car o)))
+  (if USE-ALL-IN-ONE-SYNC-LAYER
+    a o
+    ))
+
+(defmacro gen_merge_sync (m_or_s)
+  (define name 'sync_ovlp_mpi_field)
+  (define m2o_name (concat 'Field3D_Seq_ovlp_sync_ovlp_m2o_ once_allinone))
+  (define o2m_name (concat 'Field3D_Seq_ovlp_sync_ovlp_o2m_ once_allinone))
+  (case m_or_s
+    ('m 
+      (set! name 'merge_ovlp_mpi_field)
+      (set! m2o_name (concat 'Field3D_Seq_ovlp_merge_ovlp_m2o_ once_allinone))
+      (set! o2m_name (concat 'Field3D_Seq_ovlp_merge_ovlp_o2m_ once_allinone))
+      )
+    (else 0)
+    )
+  `(begin
+     (defun-class-Field3D_MPI ,(multi-concat name "") int ()
+       ;(LOG_RECORD_INFO "Into sync\n")
+       (define i 0)
+       (define num_data num_runtime)
+       (dec-array size_t all_sync_len num_data)
+       (dec-array size_t v_offset num_data)
+       (for i=0 i<num_data i++
+	 (begin 
+	   (,m2o_name (+ data i) 1)
+	   (class-header-Field3D_Seq (+ data i))
+	   (set! (vrf v_offset i) 0)
+	   (set! (vrf all_sync_len i) (* numvec num_ele (- (* xblock yblock zblock) (* xlen ylen zlen))))
+	   ;(LOG_RECORD_INFO "allen=%d\n" (vrf all_sync_len i))
+	   )
+	 )
+       (define-int fieldid)
+       (for fieldid=0 (< fieldid NUM_SYNC_LAYER) fieldid++
+	 (if (== fieldid (/ NUM_SYNC_LAYER 2)) (continue))
+	 (for i=0 i<num_data i++
+	   (class-header-Field3D_Seq (+ data i))
+	   (USE-A/O 
+	     (begin 
+	       (define-double* sync_mem_host)
+	       ;(define-double* swap_mem_host)
+	       (choose_the_runtime (pscmc_get_h_data (vector-ref sync_layer_pscmc 0) ("&" sync_mem_host)))
+	       ;(choose_the_runtime (pscmc_get_h_data (vector-ref swap_layer_pscmc 0) ("&" swap_mem_host)))
+	       ))
+	   (USE-A/O
+	     (if (eq? fieldid 0) (choose_the_runtime (pscmc_mem_sync_d2h (vector-ref sync_layer_pscmc 0))))
+	     (choose_the_runtime (pscmc_mem_sync_d2h (vector-ref sync_layer_pscmc fieldid))))
+	   (define-int tid)
+	   (define sllen (vector-ref sync_layer_len fieldid))
+	   (for tid=0 (< tid numvec) tid++
+	     ;(define-PS_MPI_Request rqst)
+	     ;(define-long numsyncdata (*))
+	     (define-double* t0)
+	     (USE-A/O
+	       (begin
+		(set! t0 (+ sync_mem_host (vrf v_offset i)))
+		)
+		(choose_the_runtime (pscmc_get_h_data (vector-ref sync_layer_pscmc fieldid) ("&" t0))))
+	     (define-int REMOTE_PROC_ID (GET_MPI_PROC_NUM_BY_PID pthis (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid))))
+	     ;(LOG_RECORD_INFO "cur_rank=%d rmt_pid=%d\n" cur_rank REMOTE_PROC_ID)
+	     ;(LOG_RECORD_INFO "rks=%d %d, tid=%d, num_data=%d, i=%d\n" (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)) (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2))) tid num_data i)
+	     (block
+	       (if (== (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)) (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2)))) ;(== cur_rank REMOTE_PROC_ID) 
+		 (begin
+		   ;(LOG_RECORD_INFO "t0=0x%lx, tid=%d sllen=%d\n" t0 tid sllen)
+		   continue)
+		 ;(LOG_RECORD_OUT "send rank=%d pid=%d mpipid=%d i=%d fieldid=%d tid=%d sllen=%d\n" rank (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2))) (GET_MPI_PROC_NUM_BY_PID pthis (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)))  i fieldid tid sllen)
+		 (begin
+		   ;(LOG_RECORD_INFO "0x%lx %d %d 0x%lx rpi=%d\n"  (+ t0 (* tid sllen)) sllen tid t0 REMOTE_PROC_ID)
+		   ;(LOG_RECORD_INFO "rqst=0x%lx\n" (+ (vector-ref rqst i) (+ (* tid NUM_SYNC_LAYER) fieldid)))
+		   (PS_MPI_Isend (+ t0 (* tid sllen)) sllen PS_MPI_DOUBLE REMOTE_PROC_ID (+ (* NUM_SYNC_LAYER (vector-ref adj_ids (+ (* tid NUM_SYNC_LAYER) fieldid))) fieldid) comm (+ (vector-ref rqst i) (+ (* tid NUM_SYNC_LAYER) fieldid)))))))
+	   )
+	 (for i=0 i<num_data i++
+	   (class-header-Field3D_Seq (+ data i))
+	   (USE-A/O 
+	     (begin 
+	       (define-double* sync_mem_host)
+	       (define-double* swap_mem_host)
+	       (choose_the_runtime (pscmc_get_h_data (vector-ref sync_layer_pscmc 0) ("&" sync_mem_host)))
+	       (choose_the_runtime (pscmc_get_h_data (vector-ref swap_layer_pscmc 0) ("&" swap_mem_host)))
+	       (incf! swap_mem_host (vrf all_sync_len i))
+	       ))
+	   (define-int tid)
+	   (define-int fieldid1 (- (- NUM_SYNC_LAYER 1) fieldid))
+	   (declare-double* t1 t0)
+	   (define sllen (vector-ref sync_layer_len fieldid1))
+	   (for tid=0 (< tid numvec) tid++
+	     (USE-A/O 
+	       (begin 
+		 (set! t1 (- swap_mem_host (+ (vrf v_offset i) (* sllen numvec))))
+		 (set! t0 (+ sync_mem_host (vrf v_offset i)))
+		 ;(LOG_RECORD_INFO "v_offset=%d, ro=%d\n" (vrf v_offset i) (- (vrf all_sync_len i) (+ (vrf v_offset i) (* sllen numvec))))
+		 )
+	       (begin 
+		 (choose_the_runtime (pscmc_get_h_data (vector-ref swap_layer_pscmc fieldid1) ("&" t1)))
+		 (choose_the_runtime (pscmc_get_h_data (vector-ref sync_layer_pscmc (- (- NUM_SYNC_LAYER 1) fieldid1)) ("&" t0)))))
+	     (block
+	       (define-long adj_proc_id (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid1)))
+	       (define-int REMOTE_PROC_ID (GET_MPI_PROC_NUM_BY_PID pthis adj_proc_id))
+	       ;(LOG_RECORD_INFO "rank=%d pid=%d mpipid=%d i=%d fieldid=%d tid=%d sllen=%d\n" cur_rank (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2))) (GET_MPI_PROC_NUM_BY_PID pthis (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)))  i fieldid tid sllen)
+	       ;(LOG_RECORD_INFO "i=%d, fid=%d fid1=%d\n" i fieldid fieldid1)
+	       (if (== adj_proc_id (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2))))
+		 (begin
+		   (define t0id (vector-ref adj_local_tid (+ (* tid NUM_SYNC_LAYER) fieldid1)))
+		   ;(LOG_RECORD_INFO "0x%lx, t0=0x%lx, tid=%d t0id=%d sllen=%d\n" t1 t0 tid t0id sllen)
+		   (memcpy (+ t1 (* tid sllen)) (+ t0 (* t0id sllen)) (* (sizeof double ) sllen))
+		   )
+		 (PS_MPI_Recv (+ t1 (* tid sllen)) sllen PS_MPI_DOUBLE REMOTE_PROC_ID (+ (* NUM_SYNC_LAYER (vector-ref adj_ids (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2)))) (- (- NUM_SYNC_LAYER 1) fieldid1)) comm NULL)))
+	     )
+
+	   (USE-A/O 
+	     (begin
+	       (incf! (vrf v_offset i) (* sllen numvec))
+	       )
+	     (choose_the_runtime (pscmc_mem_sync_h2d (vector-ref swap_layer_pscmc fieldid1))))
+	   )
+	 (for i=0 i<num_data i++
+	   (class-header-Field3D_Seq (+ data i))
+	   (define-int tid)
+	   (for tid=0 (< tid numvec) tid++
+	     (define-long adj_proc_id (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)))
+	     (define-int REMOTE_PROC_ID (GET_MPI_PROC_NUM_BY_PID pthis adj_proc_id))
+	     (if (== adj_proc_id (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2)))) continue
+	       (PS_MPI_Wait (+ (vector-ref rqst i) (+ (* tid NUM_SYNC_LAYER) fieldid)) NULL))
+	     )
+	   )
+	 )
+       (for i=0 i<num_data i++
+	 (class-header-Field3D_Seq (+ data i))
+	 (USE-A/O (choose_the_runtime (pscmc_mem_sync_h2d (vector-ref swap_layer_pscmc 0))))
+	 (,o2m_name (+ data i) 0)
+	 )
+       ;(LOG_RECORD_INFO "Done\n")
+       ;(find_the_proc_id )
+
+       (return 0)
+       )
+     (defun-class-Field3D_MPI ,(multi-concat name "_swap_loop") int ()
+       ;(LOG_RECORD_INFO "Into swap\n")
+       (define i 0)
+       (define num_data num_runtime)
+       (for i=0 i<num_data i++
+	 (,m2o_name (+ data i) 1)
+	 )
+       (for i=0 i<num_data i++
+	 (class-header-Field3D_Seq (+ data i))
+	 (define-int fieldid)
+	 (for fieldid=0 (< fieldid NUM_SYNC_LAYER) fieldid++
+	   (if (== fieldid (/ NUM_SYNC_LAYER 2)) (continue))
+	   (choose_the_runtime (pscmc_mem_sync_d2h (vector-ref sync_layer_pscmc fieldid)))
+	   (define-int tid)
+	   (for tid=0 (< tid numvec) tid++
+	     ;(define-PS_MPI_Request rqst)
+	     ;(define-long numsyncdata (*))
+	     (define sllen (vector-ref sync_layer_len fieldid))
+	     (define-double* t0)
+	     (choose_the_runtime (pscmc_get_h_data (vector-ref sync_layer_pscmc fieldid) ("&" t0)))
+	     (define-int REMOTE_PROC_ID (GET_MPI_PROC_NUM_BY_PID pthis (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid))))
+	     (LOG_RECORD_INFO "cur_rank=%d rmt_pid=%d\n" (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)) (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2))))
+	     (block
+	       (if (eq? (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)) (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2)))) ;(== cur_rank REMOTE_PROC_ID) 
+		 (begin
+		   continue)
+		 ;(LOG_RECORD_OUT "send rank=%d pid=%d mpipid=%d i=%d fieldid=%d tid=%d sllen=%d\n" rank (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2))) (GET_MPI_PROC_NUM_BY_PID pthis (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)))  i fieldid tid sllen)
+		 (PS_MPI_Isend (+ t0 (* tid sllen)) sllen PS_MPI_DOUBLE REMOTE_PROC_ID (+ (* NUM_SYNC_LAYER (vector-ref adj_ids (+ (* tid NUM_SYNC_LAYER) fieldid))) fieldid) comm (+ (vector-ref rqst i) (+ (* tid NUM_SYNC_LAYER) fieldid))))))))
+
+       (for i=0 i<num_data i++
+	 (class-header-Field3D_Seq (+ data i))
+	 (define-int fieldid)
+	 (for fieldid=0 (< fieldid NUM_SYNC_LAYER) fieldid++
+	   (if (== fieldid (/ NUM_SYNC_LAYER 2)) (continue))
+	   ;(choose_the_runtime (pscmc_mem_sync_d2h (vector-ref sync_layer_pscmc fieldid)))
+	   (define-int tid)
+	   (for tid=0 (< tid numvec) tid++
+	     (define sllen (vector-ref sync_layer_len fieldid))
+	     (declare-double* t1 t0)
+	     (choose_the_runtime (pscmc_get_h_data (vector-ref swap_layer_pscmc fieldid) ("&" t1)))
+	     (choose_the_runtime (pscmc_get_h_data (vector-ref sync_layer_pscmc (- (- NUM_SYNC_LAYER 1) fieldid)) ("&" t0)))
+	     (block
+	       (define-long adj_proc_id (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)))
+	       (define-int REMOTE_PROC_ID (GET_MPI_PROC_NUM_BY_PID pthis adj_proc_id))
+	       ;(LOG_RECORD_INFO "rank=%d pid=%d mpipid=%d i=%d fieldid=%d tid=%d sllen=%d\n" rank (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2))) (GET_MPI_PROC_NUM_BY_PID pthis (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)))  i fieldid tid sllen)
+	       (if (== adj_proc_id (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2))))
+		 (begin
+		   (define t0id (vector-ref adj_local_tid (+ (* tid NUM_SYNC_LAYER) fieldid)))
+		   (memcpy (+ t1 (* tid sllen)) (+ t0 (* t0id sllen)) (* (sizeof double ) sllen))
+		   )
+		 (PS_MPI_Recv (+ t1 (* tid sllen)) sllen PS_MPI_DOUBLE REMOTE_PROC_ID (+ (* NUM_SYNC_LAYER (vector-ref adj_ids (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2)))) (- (- NUM_SYNC_LAYER 1) fieldid)) comm NULL)))
+	     )
+	   (choose_the_runtime (pscmc_mem_sync_h2d (vector-ref swap_layer_pscmc fieldid)))
+	   ))
+       (for i=0 i<num_data i++
+	 (class-header-Field3D_Seq (+ data i))
+	 (define-int fieldid)
+	 (for fieldid=0 (< fieldid NUM_SYNC_LAYER) fieldid++
+	   (if (== fieldid (/ NUM_SYNC_LAYER 2)) (continue))
+	   (define-int tid)
+	   (for tid=0 (< tid numvec) tid++
+	     (define-long adj_proc_id (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) fieldid)))
+	     (define-int REMOTE_PROC_ID (GET_MPI_PROC_NUM_BY_PID pthis adj_proc_id))
+	     (if (== adj_proc_id (vector-ref adj_processes (+ (* tid NUM_SYNC_LAYER) (/ NUM_SYNC_LAYER 2)))) continue
+	       (PS_MPI_Wait (+ (vector-ref rqst i) (+ (* tid NUM_SYNC_LAYER) fieldid)) NULL))
+	     )
+
+	   ))
+
+
+       (for i=0 i<num_data i++
+	 (,o2m_name (+ data i) 0)
+	 )
+       ;(find_the_proc_id )
+       ;(LOG_RECORD_INFO "Done swap\n")
+
+       (return 0)
+       )))
+(gen_merge_sync m)
+(gen_merge_sync s)
+
+(eval-scmc-global 
+  (begin-map
+    (lambda (d2hh2d)
+
+      `(defun-class-Field3D_MPI ,(concat 'sync_main_data d2hh2d) int ()
+	 (define i 0)
+	 (for i=0 i<num_runtime i++
+	   (class-header-Field3D_Seq (+ data i))
+	   (choose_the_runtime (,(concat 'pscmc_mem_sync d2hh2d) main_data))
+	   )
+	 (return 0)
+	 )
+      )
+    '(_d2h _h2d)
+    )
+  )

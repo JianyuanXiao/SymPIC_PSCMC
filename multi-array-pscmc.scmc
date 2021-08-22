@@ -1,0 +1,91 @@
+
+(define (gen-multi-array-fun ker-var n numvec ker-name numele-paras fix-vars fix-vec-vars call-fun-args-pfx call-fun-args-mpi-pfx inputs extr-args) 
+  ;(gen-multi-array-fun ... fun1 fix-var '((double* in1) (int* in2)) '((double M)))
+  ;(define fix-vars '((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock)))
+  (define allargs (append (cdr inputs) extr-args))
+  ;(write inputs current-error-port) (newline current-error-port)
+  (define mpi-allargs (append (map (lambda (x) (list 'Field3D_MPI* (cadr x))) (cdr inputs)) extr-args))
+  (define (init-fun rt)
+    `(block
+       (declare size_t structlen)
+       (,(multi-concat rt ker-name "_get_struct_len") ("&" structlen))
+       (vector-set! (structp-ref pthis ,ker-var) ,n (malloc structlen))
+       (,(multi-concat rt ker-name "_init") pe (vector-ref (structp-ref pthis ,ker-var) ,n)) 
+       )
+    )
+  (define (call-fun rt)
+    (define mpn0 -1) 
+    ;(write fix-vars current-error-port) (newline current-error-port)
+    `(begin
+       (defun-class-Field3D_Seq ,(multi-concat rt 'Field3D_Seq_ ker-name) int ,allargs
+	 ,(begin-map
+	    (lambda (x)
+	      (incf! mpn0)
+	      (if (eq? mpn0 0)
+		`(,(multi-concat rt ker-name '_scmc_set_parameter_ x) (vector-ref ,ker-var ,n) main_data)
+		`(,(multi-concat rt ker-name '_scmc_set_parameter_ x) (vector-ref ,ker-var ,n) (structp-ref ,x main_data))
+		)
+	      ) (map cadr inputs)
+	    )
+	 ,(begin-map
+	    (lambda (x)
+	      `(,(multi-concat rt ker-name '_scmc_set_parameter_ x) (vector-ref ,ker-var ,n) ,x)
+	      ) fix-vec-vars
+	    )
+	 ;(define XLEN __xlen)
+	 ;(define YLEN __ylen)
+	 ;(define ZLEN zlen)
+	 ;(define-long y_cpu_core numvec)
+	 ,(call-fun-args-pfx)
+	 ,(begin-map
+	    (lambda (np1)
+	      (multi-define type name np1)
+	      (cond
+		((eq? name 'num_ele) '())
+		(else
+		  (define num_ele_blto 
+		    (let loop ((n 0) (name (string->list (symbol->string name))))
+		      (cond
+			((eq? n 8) (string->symbol (list->string name)))
+			(else
+			  (loop (+ n 1) (cdr name))
+			  )
+			)
+		      ))
+		  `(define-int ,name (structp-ref ,num_ele_blto num_ele))
+		  )
+		)
+	      )
+	    numele-paras
+	    )
+	 ;,(begin (write (list numele-paras fix-vars extr-args) current-error-port) (newline current-error-port) '())
+	 ,(with-kernel-parameters rt ker-name
+	    (append numele-paras fix-vars extr-args)
+	    `(vector-ref ,ker-var ,n)
+	    `(,(multi-concat rt ker-name '_exec) (vector-ref ,ker-var ,n) (,(multi-concat rt ker-name '_get_xlen)) ,numvec) 
+	    )
+	 (return 0)
+	 )
+       )
+  )
+  (define (call-fun-seq-mpi)
+    (define seqname (multi-concat 'Field3D_Seq_ ker-name))
+    `(begin
+       (defun-class-Field3D_Seq ,seqname int ,allargs
+	 (choose_the_runtime (,seqname pthis . ,(map (lambda (x) (cadr x)) allargs)))
+	 (return 0)
+	 )
+       (defun-class-Field3D_MPI ,(multi-concat 'MPI_ ker-name) int ,mpi-allargs
+	 (define i 0)
+	 ,(call-fun-args-mpi-pfx)
+	 (for i=0 (< i num_runtime) i++ 
+	   ;(define data0 data)
+	   ;(class-header-Field3D_MPI inEB)
+	   (,seqname (+ data i) . ,(append (map (lambda (x) `(+ (structp-ref ,(cadr x) data) i)) (cdr inputs)) (map cadr extr-args))) 
+	   )
+	 (return 0)
+	 )
+       )
+    )
+  (list init-fun call-fun call-fun-seq-mpi)
+  )

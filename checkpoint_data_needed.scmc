@@ -1,0 +1,160 @@
+
+(define identity_info
+  `(;name type
+     (XMAX . long)
+     (YMAX . long)
+     (ZMAX . long)
+     (NUM_PROCESS . long)
+     (NUM_RUNTIME . long)
+     (NUM_MAX_RUNTIME . long)
+     (NUM_N_HILBERT . long)
+     (NUM_SPEC . long)
+     )
+  )
+(define type-format-map 
+  (fast-make-single-env-from-var-and-val 
+    `(
+       (int . "%d")
+       (long . "%ld")
+       (float . "%.8e")
+       (double . "%.16e")
+       )
+    ))
+(define base_types '(int long float double))
+(define procedure? lambda?)
+
+(define data_struct_defs
+  `(
+     (Particle_in_Cell_MPI 
+       (MPI_fieldE Field3D_MPI_ALL )
+       (MPI_fieldB Field3D_MPI)
+       ;(MPI_fieldB1 Field3D_MPI)
+       (MPI_FoutJ Field3D_MPI)
+       (MPI_fieldEtmp Field3D_MPI)
+       (MPI_fieldE_ext Field3D_MPI)
+       (MPI_fieldB_ext Field3D_MPI)
+       )
+     (Field3D_MPI_ALL
+       (data array Field3D_Seq num_runtime)
+       (particles array One_Particle_Collection (* num_runtime num_spec))
+       )
+     (Field3D_MPI
+       (data array Field3D_Seq num_runtime)
+       )
+     (Field3D_Seq
+       (main_data pscmc-array double )
+       )
+     (One_Particle_Collection . 
+       ,(map 
+	  (lambda (x)
+	    (define name (car x))
+	    (define type (cadr x))
+	    `(,name pscmc-array ,type ,(lambda (p) `(structp-ref (structp-ref ,p pfield) CD_type)))
+	    ) quick_variables)
+       )
+     ))
+(define gen-save/load 
+  (named-lambda self (fwrite/fread save/load parent_pointer struct_data)
+    (patmatch struct_data
+      ((name basedata) (guard (isinlst basedata base_types))
+	`(incf! num_saved (,fwrite/fread ("&" (structp-ref ,parent_pointer ,name)) (sizeof ,basedata) 1 fp cur_proc num_one_group num_max_proc))
+	)
+      ((name 'array basedata num) (guard (isinlst basedata base_types)) 
+	(write num current-error-port) (newline current-error-port)
+	(if (number? num) 0 
+	  (if (pair? num) 
+	    (set! num (cons (car num) (map (lambda (x) `(structp-ref ,parent_pointer x)) (cdr num))))
+	    (set! num `(structp-ref ,parent_pointer ,num))))
+	`(incf! num_saved (,fwrite/fread (structp-ref ,parent_pointer ,name) (sizeof ,basedata) ,num fp cur_proc num_one_group num_max_proc))
+	)
+      ((name 'pscmc-array basedata . cd-type-list) (guard (isinlst basedata base_types))
+	(define cd-type 
+	  (if (null? cd-type-list) 
+	    `(structp-ref ,parent_pointer CD_type)
+	    ((car cd-type-list) parent_pointer)
+	    ))
+	(define sync_d2h (if (eq? save/load 'save_) `(choose_the_runtime (pscmc_mem_sync_d2h (structp-ref ,parent_pointer ,name))) '()))
+	(define sync_h2d (if (eq? save/load 'load_) `(choose_the_runtime (pscmc_mem_sync_h2d (structp-ref ,parent_pointer ,name))) '()))
+	`(block
+	   (declare (,basedata *) tmp_array)
+	   (define-int CD_type ,cd-type)
+	   ,sync_d2h
+	   (choose_the_runtime (pscmc_get_h_data (structp-ref ,parent_pointer ,name) ("&" tmp_array)))
+	   (incf! num_saved (,fwrite/fread tmp_array (choose_the_runtime (pscmc_mem_get_num (structp-ref ,parent_pointer ,name))) (sizeof ,basedata) fp cur_proc num_one_group num_max_proc))
+	   ,sync_h2d
+	   )
+	)
+      ((name type)
+	`(if ("&" (structp-ref ,parent_pointer ,name))
+	   (begin
+	     (incf! num_saved (,(concat save/load type) fp ("&" (structp-ref ,parent_pointer ,name)) cur_proc num_one_group num_max_proc))
+	     )
+	   (begin
+	     (assert (== NULL ,(multi-concat "invalid pointer while " save/load " " name)))
+	     )
+	   )
+	)
+      ((name 'array type num)
+	(if (number? num) 0 
+	  (if (pair? num) 
+	    (set! num (cons (car num) (map (lambda (x) `(structp-ref ,parent_pointer ,x)) (cdr num))))
+	    (set! num `(structp-ref ,parent_pointer ,num))))
+	`(for-from-to tmpi2 0 ,num
+	   (incf! num_saved (,(multi-concat save/load type) fp (+ (structp-ref ,parent_pointer ,name) tmpi2) cur_proc num_one_group num_max_proc))
+	   )
+	)
+      (x (car 0))
+      ))
+  )
+(define (gen-load-lists parent_pointer struct_data)
+  (gen-save/load 'fread_multi_proc 'load_ parent_pointer struct_data)
+  )
+(define (gen-save-lists parent_pointer struct_data)
+  (gen-save/load 'fwrite_multi_proc 'save_ parent_pointer struct_data)
+  )
+(define data_needed
+  `(
+     (("&" t) . long )
+     (("&" tsave) . long )
+     (ppis . Particle_in_Cell_MPI)
+     )
+  )
+(define (gen-save-load-data-needed save/load)
+  `(begin
+     ,(begin-map
+	(lambda (name-type)
+	  (define name (car name-type))
+	  (define type (cdr name-type))
+	  `(,(multi-concat save/load '_ type) fp ,name cur_proc num_one_group num_max_proc)
+	  )
+	data_needed
+	)
+     (if use_rel_ncr
+       ,(begin-map
+	  (lambda (name-type)
+	    (define name (car name-type))
+	    (define type (cdr name-type))
+	    `(,(multi-concat save/load '_ type) fp ,name cur_proc num_one_group num_max_proc)
+	    )
+	  `(
+	     (("&" ppis->MPI_fieldE01_2x) . Field3D_MPI)
+	     (("&" ppis->MPI_fieldB0_2x) . Field3D_MPI)
+	     )
+	  )
+       )
+     (if M_USE_AVER_OUTPUT
+       ,(begin-map
+	  (lambda (name-type)
+	    (define name (car name-type))
+	    (define type (cdr name-type))
+	    `(,(multi-concat save/load '_ type) fp ,name cur_proc num_one_group num_max_proc)
+	    )
+	  `(
+	     (paver_E . Field3D_MPI)
+	     (paver_B . Field3D_MPI)
+	     (paver_J . Field3D_MPI)
+	     (paver_EN . Field3D_MPI)
+	     )
+	  ))
+     )
+  )

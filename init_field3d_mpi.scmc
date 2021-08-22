@@ -1,0 +1,732 @@
+;paravec.scmc general_macros.scmc
+
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(include< "stdint.h")
+(include< "math.h")
+(include< "complex.h")
+(include< "assert.h")
+;(include- "c_/c_pscmc_inc.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include- "space_filling_curve.h")
+(include- "init_adjoint_relation.h")
+(include- "init_field3d_mpi.h")
+(include- "mpifields.h")
+(include- "cfgcst.h")
+(include- "genrand.h")
+(include< "cgapsio.h")
+
+(define-scmc-global field-vars-mpi '((long num_runtime) (PS_MPI_Comm comm) (long cur_rank) (long num_mpi_process)))
+(defun-class-Field3D_MPI init_Field3D_MPI_from_new_num_ele void ((Field3D_MPI* f) (int new_num_ele))
+  (set! (vector-ref pthis 0) (vector-ref f 0))
+  (reinit_Field3D_MPI pthis new_num_ele)
+  )
+(defun-class-Field3D_MPI init_Field3D_MPI_from void ((Field3D_MPI* f))
+  (init_Field3D_MPI_from_new_num_ele pthis f 0)
+  )
+
+(defun-class-Field3D_MPI reinit_Field3D_MPI void ((int new_num_ele))
+  (block 
+    (define-Field3D_Seq* tmpdata pthis->data)
+    (set! (structp-ref pthis data) (TYPE_MALLOC Field3D_Seq num_runtime))
+    (set! (structp-ref pthis rqst) (TYPE_MALLOC PS_MPI_Request* num_runtime))
+    (if new_num_ele
+      (fffor_xyz_from_zero_to 3 3 3
+	(class-header-Field3D_Seq tmpdata)
+	(define-long rxlen ovlp)
+	(define-long rylen ovlp)
+	(define-long rzlen ovlp)
+	(if (== xyzx 1) (set! rxlen xlen))
+	(if (== xyzy 1) (set! rylen ylen))
+	(if (== xyzz 1) (set! rzlen zlen))
+	;(LOG_RECORD_INFO "xyzxyz=[%d %d %d], xyzlen=[%d %d %d]\n" xyzx xyzy xyzz rxlen rylen rzlen)
+	(vector-set! pthis->sync_layer_len (GET_IDXYZL xyzx xyzy xyzz 0 1 3 3 3) (* rxlen rylen rzlen new_num_ele))
+	)
+      )
+    (for-from-to i 0 num_runtime
+      (set! (vector-ref pthis->data i) (vector-ref tmpdata i))
+      (if new_num_ele (set! (structp-ref (+ pthis->data i) num_ele) new_num_ele))
+      (block
+	(define-int CD_type (structp-ref (+ pthis->data i) CD_type))
+	(define-long numvec (structp-ref (+ pthis->data i) numvec))
+	(alloc_Field3D_Seq (+ pthis->data i) 0)
+	(set! (structp-ref (+ pthis->data i) cur_rankx_pscmc ) (structp-ref (+ tmpdata i) cur_rankx_pscmc))
+	(set! (structp-ref (+ pthis->data i) cur_ranky_pscmc ) (structp-ref (+ tmpdata i) cur_ranky_pscmc))
+	(set! (structp-ref (+ pthis->data i) cur_rankz_pscmc ) (structp-ref (+ tmpdata i) cur_rankz_pscmc))
+	(set! (structp-ref (+ pthis->data i) xoffset) (structp-ref (+ tmpdata i) xoffset))
+	(set! (structp-ref (+ pthis->data i) yoffset) (structp-ref (+ tmpdata i) yoffset))
+	(set! (structp-ref (+ pthis->data i) zoffset) (structp-ref (+ tmpdata i) zoffset))
+	
+	(define-int* tmpvi (choose_the_runtime (pscmc_get_h_data (structp-ref (+ pthis->data i) cur_rankx_pscmc ) NULL)))
+	;(LOG_RECORD_INFO "0x%lx %d\n" tmpvi (vector-ref tmpvi 0))
+	(eval-scmc-global 
+	  (begin-map
+	  (lambda (name-num)
+	    (multi-define name num name-num)
+	    `(memcpy (structp-ref (+ pthis->data i) ,name) (structp-ref (+ tmpdata i) ,name) (* (sizeof long ) ,num numvec))
+	    )
+	  '((global_id 1) (global_x_offset 1) (global_y_offset 1) (global_z_offset 1) (adj_ids NUM_SYNC_LAYER) (adj_processes NUM_SYNC_LAYER) (adj_local_tid NUM_SYNC_LAYER))
+	  ))
+	)
+      (set! (vector-ref pthis->rqst i) (TYPE_MALLOC PS_MPI_Request (* NUM_SYNC_LAYER (structp-ref (+ pthis->data i) numvec))))
+      )
+    )
+  )
+(eval-scmc-global 
+  `(begin
+     
+     (defun init_Field3D_MPI_ALL int ,(append `((Field3D_MPI* pthis) (Field3D_Seq* sample_field) (long n_hilbert) (int ndim) (int adjoint_type) (long* tids) (int64_t* local_tid_array) (int* cd_types) (int* dev_nums) (int* cd_performances)) field-vars-mpi)
+       ,(begin-map (lambda (x) (fun-setp-class 'pthis (cadr x))) field-vars-mpi)
+       (block
+	 (gen-const-vars G_ (DAMP_RATIO))
+	 (set! (structp-ref pthis damp_vars) G_DAMP_RATIO)
+	 )
+       (set! (structp-ref pthis data) (TYPE_MALLOC Field3D_Seq num_runtime))
+       (define i 0)
+       (define-long onedim_len (shift-l 1 n_hilbert))
+       (define-long numallthreads 
+	 (cond
+	   ((== ndim 1) onedim_len)
+	   ((== ndim 2) (* onedim_len onedim_len))
+	   ((== ndim 3) (* onedim_len onedim_len onedim_len))
+	   (else (LOG_RECORD_INFO "Warning: unknown dimension d=%d\n" ndim))
+	   ))
+     (define onen (shift-l 1 n_hilbert))
+     (define alllen 1)
+     (assert ndim<4)
+     (for-from-to g 0 ndim
+       (set! alllen (* alllen onen))
+       )
+       
+     (define-size_t* ovvec (malloc (* (sizeof size_t ) alllen)))
+     (define-size_t* ori_vec (malloc (* (sizeof size_t ) alllen)))
+     (cond
+       ((== ndim 1)
+	 (sp_fill_curve_1d ovvec ori_vec onen)
+	 )
+       ((== ndim 2)
+	 (hilbert_curve_2d ovvec ori_vec n_hilbert onen)
+	 )
+       ((== ndim 3)
+	 (hilbert_curve_3d ovvec ori_vec n_hilbert onen onen)
+	 )
+       (else
+	 (LOG_RECORD_INFO "Error: unknown ndim=%d\n" ndim)
+	 (assert 0)
+	 )
+       )
+       (block
+	 (gen-const-vars M_ (USE_CALC_WEIGHT))
+
+	 (define-long n NUM_PROCESS)
+	 (define-long num_runtime NUM_RUNTIME)
+	 (define-long numt alllen)
+	 ;(dec-array long tids (* n num_runtime))
+	 (if M_USE_CALC_WEIGHT
+	   (begin
+	     ;(define-double cplx (call_CAL_FUN_XYZ "get_problem_complexity" x y z))
+	     (init_complexity_tid (* n num_runtime) numt ori_vec tids local_tid_array cd_performances num_runtime)
+	     )
+	   (init_uniform_tid (* n num_runtime) numt tids local_tid_array cd_performances num_runtime)
+	   )
+
+	 )
+       ;(for-from-to i 0 (* NUM_RUNTIME NUM_PROCESS) (LOG_RECORD_INFO "tids[%d]=%d\n" i (vector-ref tids i)))
+
+
+       (set! pthis->rqst (TYPE_MALLOC PS_MPI_Request* num_runtime))
+       (for i=0 (< i num_runtime) i++
+	 (vector-set! pthis->data i (vector-ref sample_field 0))
+	 (set! (structp-ref (+ pthis->data i) CD_type) (vector-ref cd_types i))
+	 (set! (structp-ref (+ pthis->data i) numvec) (get_cur_num_tid (+ (* num_runtime cur_rank) i) numallthreads (* num_runtime num_mpi_process) tids))
+	 ;(LOG_RECORD_INFO "rt=%d numvec=%d\n" (+ (* num_runtime cur_rank) i) (structp-ref (+ pthis->data i) numvec) )
+	 (declare-size_t pelen)
+	 (define-int CD_type (structp-ref (+ pthis->data i) CD_type))
+	 (choose_the_runtime (pscmc_get_env_len ("&" pelen)))
+	 (set! (structp-ref (+ pthis->data i) pe) (malloc pelen))
+	 (choose_the_runtime (pscmc_env_init (structp-ref (+ pthis->data i) pe) (vector-ref dev_nums i) NULL))
+	 ;(set! (structp-ref (+ pthis->data i)) pe ((,concat )))
+	 (set! (structp-ref (+ pthis->data i) global_pid) (+ (* cur_rank num_runtime) i))
+	 (alloc_Field3D_Seq (+ pthis->data i) 1)
+	 (set! (vector-ref pthis->rqst i) (TYPE_MALLOC PS_MPI_Request (* NUM_SYNC_LAYER pthis->data->numvec)))
+	 (init_adjoint_relations (+ pthis->data i) n_hilbert ndim adjoint_type (* num_mpi_process num_runtime) ovvec ori_vec tids local_tid_array)
+	 )
+       (fffor_xyz_from_zero_to 3 3 3
+	 (class-header-Field3D_Seq sample_field)
+
+	 (define-long rxlen ovlp)
+	 (define-long rylen ovlp)
+	 (define-long rzlen ovlp)
+	 (if (== xyzx 1) (set! rxlen xlen))
+	 (if (== xyzy 1) (set! rylen ylen))
+	 (if (== xyzz 1) (set! rzlen zlen))
+	 ;(LOG_RECORD_INFO "xyzxyz=[%d %d %d], xyzlen=[%d %d %d]\n" xyzx xyzy xyzz rxlen rylen rzlen)
+	 (vector-set! pthis->sync_layer_len (GET_IDXYZL xyzx xyzy xyzz 0 1 3 3 3) (* rxlen rylen rzlen num_ele))
+	 )
+     (free ovvec)
+     (free ori_vec)
+       
+       (return 0)
+       )
+     )
+  )
+(defun-class-Field3D_MPI command_flush_Field3D_MPI int ()
+  (define i 0)
+  (for i=0 i<num_runtime i++
+    (command_flush_Field3D_Seq (+ data i))
+    )
+  (return 0)
+  )
+(defun-class-Field3D_MPI delete_Field3D_MPI int ()
+  (define i 0)
+  (for i=0 i<num_runtime i++
+    (delete_Field3D_Seq (+ data i))
+    )
+  (return 0)
+  )
+(eval-scmc-global 
+  (begin
+    (define (map_init_field_internal ename name fun_xyzl)
+      (define name_2d_extend (multi-concat name '_2d_extend))
+      (define name_2d_extend_rand (multi-concat name '_2d_extend_rand))
+      `(begin 
+	 (defun-class-Field3D_MPI ,name_2d_extend_rand void ((int reduce_dim) (double r_x_rat) (double r_y_rat) (double r_z_rat) (double random_rate))
+	   (define-int reduce_x (eq? reduce_dim 1))
+	   (define-int reduce_y (eq? reduce_dim 2))
+	   (define-int reduce_z (eq? reduce_dim 3))
+	   (dec-array double r_r_r 3)
+	   (vector-set! r_r_r 0 r_x_rat)
+	   (vector-set! r_r_r 1 r_y_rat)
+	   (vector-set! r_r_r 2 r_z_rat)
+
+	   ;(define G_ )
+	   (define-char* nm ,(multi-concat "" ename "_file"))
+	   (define-FILE* fp (fopen nm "r"))
+	   (if fp 
+	     (begin 
+	       (fclose fp)
+	       (LOG_RECORD_INFO "found %s for input\n" nm)
+	       (decl-var-and-pvar Gaps_IO_DataFile gid)
+	       ;(init_parallel_file_for_mpi_fields pthis pgid nm 0 0)
+	       (GAPS_IO_InitIFile pgid nm)
+	       ;(LOG_RECORD_INFO "name=%s shp=[%d %d %d %d]\n" nm (vrf (structp-ref pgid pdimarray) 0) (vrf (structp-ref pgid pdimarray) 1) (vrf (structp-ref pgid pdimarray) 2) (vrf (structp-ref pgid pdimarray) 3))
+	       (for-from-zero-to i num_runtime
+		 (class-header-Field3D_Seq (+ data i))
+		 (for-from-zero-to j numvec
+		   (fffor_xyz_from_to 0 0 0 1 ylen zlen
+		     (define is (+ (vector-ref global_x_offset j) 0))
+		     (define js (+ (vector-ref global_y_offset j) xyzy))
+		     (define ks (+ (vector-ref global_z_offset j) xyzz))
+		     ;(define islen (* xlen x_num_thread_block))
+		     ;(define jslen (* ylen y_num_thread_block))
+		     ;(define kslen (* zlen z_num_thread_block))
+		     (assert (== (structp-ref pgid dim) 4))
+		     (assert (== (structp-ref pgid version) 0))
+		     (assert (== (structp-ref pgid type) GAPS_IO_FLOAT64))
+		     (assert (== (vrf (structp-ref pgid pdimarray) 0) num_ele))
+		     (define-long imax (vrf (structp-ref pgid pdimarray) 1))
+		     (define-long jmax (vrf (structp-ref pgid pdimarray) 2))
+		     (define-long kmax (vrf (structp-ref pgid pdimarray) 3))
+		     (GAPS_IO_DataSeek pgid 0 (* num_ele (+ (if reduce_x 0 is) (* (if reduce_x 1 imax) (+ (if reduce_y 0 js) (* (if reduce_y 1 jmax) (if reduce_z 0 ks)))))))
+		     (GAPS_IO_FRead pgid ("&" (GET_FIELD3D_SEQ (+ data i) j 0 xyzy xyzz 0)) (* num_ele (if reduce_x 1 xlen)))
+		     (if reduce_dim
+		       (for-from-zero-to g (if reduce_x 1 xlen)
+			 (for-from-zero-to l num_ele
+			   (if (< l 3)
+			     (set! (GET_FIELD3D_SEQ (+ data i) j g xyzy xyzz l)
+			       (* (vector-ref r_r_r l) (GET_FIELD3D_SEQ (+ data i) j g xyzy xyzz l))))
+			   (if random_rate
+			     (incf! (GET_FIELD3D_SEQ (+ data i) j g xyzy xyzz l)
+			       (* (GET_FIELD3D_SEQ (+ data i) j g xyzy xyzz l) random_rate (rand01 0 1))
+			       )
+			     )
+			   )
+			 )
+		       )
+		     ))
+		 )
+	       (GAPS_IO_DeleteDataInfo pgid)
+	       )
+	     (for-from-to i 0 num_runtime 
+	       (class-header-Field3D_Seq (+ data i))
+	       (for-from-to j 0 numvec
+		 (fffor_xyz_from_to (- ovlp) (- ovlp) (- ovlp) (+ xlen ovlp) (+ ylen ovlp) (+ zlen ovlp)
+		   (define is (+ (vector-ref global_x_offset j) xyzx))
+		   (define js (+ (vector-ref global_y_offset j) xyzy))
+		   (define ks (+ (vector-ref global_z_offset j) xyzz))
+		   (for-from-to l 0 num_ele
+		     (set! (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz l) ,(fun_xyzl))
+		     )
+		   )
+		 )
+	       ))
+	   )
+	 (defun-class-Field3D_MPI ,name_2d_extend void ((int reduce_dim) (double r_x_rat) (double r_y_rat) (double r_z_rat))
+	   (return (,name_2d_extend_rand pthis reduce_dim r_x_rat r_y_rat r_z_rat 0))
+	   )
+	 (defun-class-Field3D_MPI ,name void ()
+	   (return (,name_2d_extend pthis 0 1 1 1))
+	   )
+	 )
+      )
+    `(begin
+       ,(begin-map
+	  (lambda (ename)
+	    (define name (multi-concat 'init_external_field3d_ ename))
+	    (map_init_field_internal ename name 
+	      (lambda () 
+		`(,(multi-concat 'call_GET_INIT_ ename) . ,(if (eq? ename 'DENSITY_DIST) '(l ks js is) '(ks js is l)))))
+	    )
+	  '(E B E0 B0 FILTER_E FILTER_B FILTER_KROOK DENSITY_DIST)
+	  )
+       ,(begin-map
+	  (lambda (ename)
+	    (define name (multi-concat 'init_external_field3d_without_ss_ ename))
+	    (map_init_field_internal ename name
+	      (lambda () `(GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz l))
+	      )
+	    )
+	  '(KGM DM DMf EXT_FLUID_RHO_S_VX0 J_SOURCE)
+	  ))
+    )
+  )
+(define-scmc-global gen-set-mpi-field-multi 
+  (lambda (name v-args args beffun prefun corefun lstfun)
+    (define fst-name (car v-args))
+    (define n -1)
+    `(defun ,name void ,(append (map (lambda (x) (list 'Field3D_MPI* x)) v-args) args)
+       ,beffun
+       ,(begin-map 
+	  (lambda (x) 
+	    (incf! n 1)
+	    `(block 
+	       (class-header-Field3D_MPI ,x)
+	       (for-from-to i 0 num_runtime
+		 (class-header-Field3D_Seq (+ data i))
+		 (for-from-to j 0 numvec
+		   (fffor_xyz_from_zero_to xlen ylen zlen
+		     (define ks (+ (vector-ref global_x_offset j) xyzx))
+		     (define js (+ (vector-ref global_y_offset j) xyzy))
+		     (define is (+ (vector-ref global_z_offset j) xyzz))
+		     ,(prefun n)
+		     (for-from-to ls 0 num_ele
+		       (set! (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz ls) ,(corefun n))
+		       )))
+		 ))
+	    ) v-args)
+       ,lstfun
+       ))
+  )
+(eval-scmc-global
+  (gen-set-mpi-field-multi 'init_dm_dual_phi_global '(psi1 psi2) '((double amp_ext) (double sgm_pz) (int num_p) (double dm_m) (double dz) (double zmax))
+    `(begin 
+       (define-double* pf (TYPE_MALLOC double num_p))
+       (define-double* pm (TYPE_MALLOC double num_p))
+       (define-double* as (TYPE_MALLOC double num_p))
+       (LOG_RECORD_INFO "num_p=%d\n" num_p)
+       (for-from-zero-to i num_p
+	 (label befrand)
+	 (set! (vector-ref pf i) (/ (* 2 M_PI (floor (+ (maxwell_dist 0 sgm_pz) 0.5))) zmax))
+	 (set! (vector-ref pm i) (/ (* 2 M_PI (floor (+ (maxwell_dist 0 sgm_pz) 0.5))) zmax))
+	 (if (eq? (* (vrf pf i) (vrf pm i)) 0) (goto befrand))
+	 (set! (vector-ref as i) (cos (rand01 0 M_PI)))
+	 (LOG_RECORD_INFO "pf[%d]=%e, pm[%d]=%e as[%d]=%e\n" i (vrf pf i) i (vrf pm i) i (vrf as i))
+	 )
+       (dec-array double* pfm 2)
+       (vector-set! pfm 0 pf)
+       (vector-set! pfm 1 pm)
+       )
+    (lambda (n) 
+      `(begin 
+	 (dec-array double-complex vphi 4)
+	 (for-from-zero-to i 4
+	   (set! (vrf vphi i) 0)
+	   )
+	 (for-from-zero-to s 2
+	 (define-double t0 0)
+	 (for-from-zero-to i num_p
+	   (dec-array double-complex phi_p 4)
+	   (define-double pz (vrf pfm s i))
+	   (define-double a (vector-ref as i))
+	   (define-double b (sqrt (- 1 (* a a))))
+	   (define-double Ene (runc "sqrt(pz*pz+dm_m*dm_m)"))
+	   (define-double lmd ,(if (eq? n 0) 1 -1))
+	   (define-double amp (runc "sqrt((dm_m+lmd*Ene)/(2*lmd*Ene))/pow(2*M_PI,1.5)*amp_ext"))
+	   (set! (vrf phi_p 0) a)
+	   (set! (vrf phi_p 1) b)
+	   (set! (vrf phi_p 2) (/ (* pz a) (runc "dm_m+lmd*Ene")))
+	   (set! (vrf phi_p 3) (/ (* -1 pz b) (runc "dm_m+lmd*Ene")))
+	   (define-double-complex exp_i_pz_xz (runc "cexp(_Complex_I*(pz*is*dz-lmd*Ene*t0))"))
+	   (for-from-zero-to g 4
+	     (set! (vrf phi_p g) (* (vrf phi_p g) exp_i_pz_xz amp))
+	     (incf! (vrf vphi g) (* (vrf phi_p g) (if (and (eq? s 1) (eq? ,n 1)) -1 1)))
+	     )
+	   )
+	 ))
+      )
+    (lambda (n) 
+      `(block 
+	 ;(define-double ans (if (b-and ls 1) (cimag (vrf vphi (/ ls 2))) (creal (vrf vphi (/ ls 2)))))
+	 ;(if (not (isfinite ans)) (LOG_RECORD_INFO "val=%e is=%d\n" ans is))
+	 ;ans
+	 )
+      `(if (b-and ls 1) (cimag (vrf vphi (/ ls 2))) (creal (vrf vphi (/ ls 2))))
+      )
+    `(begin 
+       (free pf)
+       (free pm)
+       (free as)
+       )
+    ))
+(defmacro gen-set-mpi-field (name args sinfun corefun . use_whole)
+  (define use_whole (if (null? use_whole) #f (car use_whole)))
+  (define use_whole_data 
+    (case use_whole
+      (#f 0)
+      (#t 1)
+      (else use_whole)
+      ))
+  ;(if (eq? use_whole 2) (set! args (append args '((int direction)))) 0)
+  `(defun-class-Field3D_MPI ,name void ,args
+     (for-from-to i 0 num_runtime 
+       (class-header-Field3D_Seq (+ data i))
+       (for-from-to j 0 numvec
+	 ,(append 
+	    (if use_whole 
+	      `(fffor_xyz_from_to (- ovlp) (- ovlp) (- ovlp) (+ xlen ovlp) (+ ylen ovlp) (+ zlen ovlp))
+	      `(fffor_xyz_from_zero_to xlen ylen zlen)
+	      )
+	    `(
+	       (define ks (+ (vector-ref global_x_offset j) xyzx))
+	       (define js (+ (vector-ref global_y_offset j) xyzy))
+	       (define is (+ (vector-ref global_z_offset j) xyzz))
+	       (define x_all_max (* xlen x_num_thread_block))
+	       (define y_all_max (* ylen y_num_thread_block))
+	       (define z_all_max (* zlen z_num_thread_block))
+	       ,sinfun
+
+	       (for-from-to ls 0 num_ele
+		 (define-double field_data (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz ls))
+		 ,(if (eq? use_whole_data 3)
+		    `(begin 
+		       ,corefun
+		       )
+		    `(begin
+		       (define-double ret 0)
+		       (block
+			 (define istmp is)
+			 (define jstmp js)
+			 (define kstmp ks)
+			 (block
+			   (define is istmp)
+			   (define js jstmp)
+			   (define ks kstmp)
+			   (if (>= is z_all_max) (incf! is (- z_all_max)))
+			   (if (>= js y_all_max) (incf! js (- y_all_max)))
+			   (if (>= ks x_all_max) (incf! ks (- x_all_max)))
+			   (if (< is 0) (incf! is z_all_max))
+			   (if (< js 0) (incf! js y_all_max))
+			   (if (< ks 0) (incf! ks x_all_max))
+			   (set! ret (if (eq? ,use_whole_data 2) ,corefun 0))
+			   )
+			 )
+		       (set! (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz ls)
+			 (if (and (eq? ,use_whole_data 2) (and (>= ks 0) (>= js 0) (>= is 0) (< ks x_all_max) (< js y_all_max) (< is z_all_max))) 0 
+			   ;(- ,corefun (if (eq? ,use_whole_data 2 ) ret 0))
+			   ;(if (eq? ,use_whole_data 2) (- ,corefun ret) ,corefun)
+			   ;(if (eq? ,use_whole_data 2) ,corefun ,corefun)
+			   (- ,corefun ret)
+			   ;corefun
+			   ;,corefun
+			   )))))
+	       ))
+	 )
+       )
+     )
+  )
+(gen-set-mpi-field init_hydro_alpha_beta ((double alp) (double bet))
+  ()
+  (begin
+    (case ls
+      (0 alp)
+      (1 bet)
+      (else 0)
+      )
+    )
+  )
+(gen-set-mpi-field set_hydro_s_0 ()
+  ()
+  (case ls
+    (1 0)
+    (else field_data)
+    )
+  )
+(gen-set-mpi-field init_hydro_rho_s_vx ((double rho0) (double drho0) (double s) (double vx) (double vy) (double vz))
+  ()
+  (begin
+    (case ls
+      (0 (+ rho0 (* drho0 (rand01 -0.5 0.5))))
+      (1 s)
+      (2 vx)
+      (3 vy)
+      (4 vz)
+      (else 0)
+      )
+    )
+  )
+(gen-set-mpi-field init_dm_phi_global_rand ((double phi_r1) (double sgm) (int use_single))
+  ()
+  (* (- 1 (and use_single (neq? ls 0))) (+ phi_r1 (rand01 (- sgm) sgm)))
+  )
+(defmacro if-phi01 (var)
+  `(* (if phi 1 -1) ,var)
+  )
+(gen-set-mpi-field init_dm_phi_global ((double dm_m) (double pz_r) (double pz_i) (double dm_z_offset) (double lmd) (double a) (double b) (double sgm_p) (double dz) (double t0) (double phi34v) (double phi) (double amp_ext))
+  (begin
+    (define-double-complex pz (+ pz_r (* _Complex_I pz_i)))
+    (define-double Ene (runc "sqrt(pz*pz+dm_m*dm_m)"))
+    ;(define-int lmd (> (rand01 0 1) 0.5))
+    (define-double amp (runc "sqrt((dm_m+lmd*Ene)/(2*lmd*Ene))/pow(2*M_PI,1.5)*amp_ext"))
+    (define-double-complex phi1 a)
+    (define-double-complex phi2 b)
+    (define-double-complex phi3 (/ (* phi34v pz a) (runc "dm_m+lmd*Ene")))
+    (define-double-complex phi4 (/ (* phi34v -1 pz b) (runc "dm_m+lmd*Ene")))
+    (define-double-complex exp_i_pz_xz (runc "cexp(_Complex_I*(pz*(is-dm_z_offset)*dz-lmd*Ene*t0))"))
+    )
+  (begin
+    (case ls
+      (0 (creal (* phi1 amp exp_i_pz_xz)))
+      (1 (if-phi01 (cimag (* phi1 amp exp_i_pz_xz))))
+      (2 (creal (* phi2 amp exp_i_pz_xz)))
+      (3 (if-phi01 (cimag (* phi2 amp exp_i_pz_xz))))
+      (4 (creal (* phi3 amp exp_i_pz_xz)))
+      (5 (if-phi01 (cimag (* phi3 amp exp_i_pz_xz))))
+      (6 (creal (* phi4 amp exp_i_pz_xz)))
+      (7 (if-phi01 (cimag (* phi4 amp exp_i_pz_xz))))
+      (else 0)
+      )
+    )
+  )
+(gen-set-mpi-field init_dm_A0_global ((double ampEy) (double dt))
+  ()
+  (begin
+    0
+    )
+  )
+(gen-set-mpi-field init_dm_A1_global ((double ampx) (double ampEz) (double dt))
+  ()
+  (begin
+    (case ls
+      ;(1 (* (rand01 (- ampx) ampx) dt))
+      ;(0 (* ampx dt))
+      (2 ampEz)
+      (else 0)
+      )
+    )
+  )
+(gen-set-mpi-field init_hydro_init_s0 ((double dsdx) (int dir))
+  ()
+  (case ls
+    (1 (* dsdx (if (eq? dir 0) ks (if (eq? dir 1) js is))))
+    (else 0)
+    )
+  #t
+  )
+(gen-set-mpi-field init_hydro_boundary_s0 ((double dsdx) (int dir))
+  ()
+  (case ls
+    (1 (* dsdx (if (eq? dir 0) ks (if (eq? dir 1) js is))))
+    (else 0)
+    )
+  2
+  )
+(gen-set-mpi-field init_hydro_init_A0y ((double B0))
+  ()
+  (case ls
+    (1 (* ks B0))
+    (else 0)
+    )
+  #t
+  )
+(gen-set-mpi-field init_hydro_boundary_A0y ((double B0))
+  ()
+  (case ls
+    (1 (* ks B0))
+    (else 0)
+    )
+  2
+  )
+(gen-set-mpi-field init_hydro_init_alpha_beta ((double B0) (double rho0))
+  ()
+  (case ls
+    (0 (* ks B0 rho0))
+    (else 0)
+    )
+  #t
+  )
+(gen-set-mpi-field dump_field ((FILE* fp))
+  ()
+  (fprintf fp "%.15e\n" field_data)
+  3
+  )
+(gen-set-mpi-field init_hydro_boundary_alpha_beta ((double B0) (double rho0))
+  ()
+  (case ls
+    (0 (* ks B0 rho0))
+    (else 0)
+    )
+  2
+  )
+
+(gen-set-mpi-field init_kgm_assemble ((double ampx) (double ampEy) (double dt) (double sgm) (double frq) (double kgm_ass_e_loc0))
+  (begin
+    (define E1 (/ (* ampEy (exp (/ (pow (- ks kgm_ass_e_loc0) 2) (* sgm sgm -2))) (sin (* ks frq))) frq))
+    (define ks1 (- ks dt))
+    (define E0 (/ (* ampEy (exp (/ (pow (- ks1 kgm_ass_e_loc0) 2) (* sgm sgm -2))) (sin (* ks1 frq))) frq))
+    )
+  (case ls
+    (1 E0)
+    (6 E1)
+    (else (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz ls))
+    )
+  )
+(gen-set-mpi-field init_kgm_global ((double phi_r0) (double m0) (double e0) (double ampx) (double ampEy) (double dt) (double sgm) (double frq) (double kgm_mid) (double kgm_len_a0) (double kgm_sgm_dens) (double use_sper) (double xmid) (double ymid) (double zmid))
+  (begin
+    ;(define p0 (* phi_r0 (exp (/ (pow (- ks 256) 2) (* sgm sgm -2)))))
+    ;(define p0 phi_r0)
+    ;(define-double p0 (+ phi_r0 (rand01 (- ampx) ampx)))
+    (define-double p0)
+    (define-long mid (abs (- ks kgm_mid)))
+    (define a0 kgm_len_a0)
+    (if (< mid a0)
+      (set! p0 phi_r0)
+      (set! p0 
+	(block
+	  (define-double c0 (- mid a0))
+	  (* phi_r0 (exp (- (/ (* c0 c0) kgm_sgm_dens))))
+	  )
+	)
+      )
+    (define-double rx (- ks xmid)) 
+    (define-double ry (- js ymid)) 
+    (define-double rz (- is zmid)) 
+    (if (eq? use_sper 1)
+      (set! p0 (* phi_r0 (exp (- (/ (+ (* rx rx) (* ry ry) (* rz rz)) (* 2 kgm_sgm_dens kgm_sgm_dens))))))
+      )
+    (define E1 (* ampEy (exp (/ (pow (- ks 64) 2) (* sgm sgm -2))) (sin (* ks frq))))
+    ;(define-double E1 (rand01 (- ampEy) ampEy))
+    ;(define-double E0 (rand01 (- ampx) ampx))
+    (define-double E0 0)
+    )
+  (cond
+    ((eq? use_sper 0)
+      (case ls
+	(0 (* E0 dt))
+	(1 (* E1 dt))
+	(3 p0)
+	(4 (* p0 m0 dt))
+	(5 0)
+	(8 p0)
+	(9 0)
+	(else 0)
+	))
+    ((eq? use_sper 1)
+      (case ls
+	(3 p0)
+	(4 (* p0 m0 dt))
+	;(4 0)
+	(8 p0)
+	(else 0))
+      )
+    (else 0)
+    )
+  )
+   
+(defun-class-Field3D_MPI set_ecrh_fields int ((double tomega) (double ampx) (double ampy) (double ampz) (double ky) (double kz) (double ikt) (long x0) (double y0) (double y1) (double z0) (double z1) (double ecrh_square_num) (double phi0))
+  (for-from-to i 0 num_runtime
+    (class-header-Field3D_Seq (+ data i))
+    (for-from-to j 0 numvec
+      (define ofx (vector-ref global_x_offset j))
+      (define ofy (vector-ref global_y_offset j))
+      (define ofz (vector-ref global_z_offset j))
+      (if (and (< x0 (+ ofx xlen)) (>= x0 ofx))
+	(begin
+	  ;(LOG_RECORD_INFO "x0=%d ofx=%d xlen=%d, ampy=%e, tomega=%e\n" x0 ofx xlen ampy tomega)
+	  (for-from-to __idy 0 ylen
+	    (for-from-to idz 0 zlen
+	      ;(define ox (+ __idx ofx))
+	      (define oy (+ __idy ofy))
+	      (define oz (+ idz ofz))
+	      (if (and (>= oy y0) (< oy y1) (>= oz z0) (< oz z1))
+		(begin
+		  ;(define-double kyx (/ (* kx (- oz z0)) (- z1 z0)))
+		  (define-double kyy (/ (* ky (- oy y0)) (- y1 y0)))
+		  (define-double kyz (/ (* kz (- oz z0)) (- z1 z0)))
+		  (define kall (+ kyy kyz))
+		  (define-double phs 
+		    (- tomega 
+		      (* 2 M_PI 
+			(if ecrh_square_num 
+			  (* (floor (/ kall (/ (+ ky kz) ecrh_square_num))) (/ (+ ky kz) ecrh_square_num)) 
+			  kall)
+			)))
+		  (define-double coef (- 1 (exp (* -1 tomega ikt))))
+		  ;(LOG_RECORD_INFO "found opt here\n")
+		  (begin
+		    (define sinphs (sin phs))
+		    (define finvar sinphs)
+		    (incf! (GET_FIELD3D_SEQ (+ data i) j (- x0 ofx) __idy idz 0) (* ampx finvar coef))
+		    (incf! (GET_FIELD3D_SEQ (+ data i) j (- x0 ofx) __idy idz 1) (* ampy finvar coef))
+		    (incf! (GET_FIELD3D_SEQ (+ data i) j (- x0 ofx) __idy idz 2) (* ampz finvar coef)))
+		  )))
+	    )))
+      )
+    )
+  (return 0)
+  )
+(defun-class-Field3D_MPI set_lhcd_fields int ((double tomega) (double k) (long location) (double ampx) (double ampy))
+  (for-from-to i 0 num_runtime
+    (class-header-Field3D_Seq (+ data i))
+    (for-from-to j 0 numvec
+      (define ofx (vector-ref global_x_offset j))
+      (define ofy (vector-ref global_y_offset j))
+      (if (and (< location (+ ofx xlen)) (>= location ofx))
+	(for-from-to __idy 0 ylen
+	  (define-double kyy (/ (* k (+ __idy ofy)) (* ylen y_num_thread_block)))
+	  (incf! (GET_FIELD3D_SEQ (+ data i) j (- location ofx) __idy 0 0) (* ampx (sin (+ tomega (* 2 M_PI kyy)))))
+	  (incf! (GET_FIELD3D_SEQ (+ data i) j (- location ofx) __idy 0 1) (* ampy (sin (+ tomega (* 2 M_PI kyy)))))
+	  ))
+      )
+    )
+  (return 0)
+  )
+(defun-class-Field3D_MPI test_set_mainland int ((double val))
+  (define i 0)
+  (for i=0 i<num_runtime i++
+    ;(LOG_RECORD_INFO "%d\n" i)
+    (class-header-Field3D_Seq (+ data i))
+    (define j 0)
+    (for j=0 j<numvec j++
+      (fffor_xyz_from_zero_to xlen ylen zlen
+	(define l 0)
+	(define is (+ (vector-ref global_x_offset j) xyzx))
+	(define js (+ (vector-ref global_y_offset j) xyzy))
+	(define ks (+ (vector-ref global_z_offset j) xyzz))
+	(for l=0 l<num_ele l++
+	  ;(set! (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz l) (* val (+ l 1) (runc "1+is+100*(js+100*ks)")))
+	  (set! (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz l) (* val (runc "1") (== 0 l)))
+	  ;(define-double dbg1 (* val (+ l 1)))
+	  ;(LOG_RECORD_OUT "ks=%d ans=%e dbg1=%e\n" ks val (runc "ks*1.5"))
+	  ;(set! (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz l) (* val (+ l 1) (runc "ks*1.0")))
+	  ;(set! (GET_FIELD3D_SEQ (+ data i) j xyzx xyzy xyzz l) val)
+	  
+	  )
+	))
+    )
+  (return 0)
+  )

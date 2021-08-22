@@ -1,0 +1,176 @@
+
+(define-scmc-global isnumele 
+  (lambda (name)
+    (set! name (string->list (symbol->string name)))
+    (let loop ((name name) (namep (string->list "num_ele")))
+      (cond
+	((null? namep) #t)
+	((null? name) #f)
+	((eq? (car name) (car namep)) (loop (cdr name) (cdr namep)))
+	(else #f)
+	)
+      )))
+(define-scmc-global fdtd-all-kernels (get-name-arg-env-pair "yeefdtd.kernel.def.ss"))
+(define-scmc-global fdtd_kernels (map car fdtd-all-kernels))
+(define-scmc-global fdtd-kernel-args (map cadr fdtd-all-kernels))
+(define-scmc-global fdtd-kernel-out-args
+  (map 
+    (lambda (f)
+      (let loop ((n 12) (f f))
+	(cond
+	  ((eq? n 0) 
+	    (map 
+	      (lambda (x)
+		(cons (caar x) (cdr x))
+		) f))
+	  (else (loop (- n 1) (cdr f)))
+	  )
+	)) fdtd-kernel-args)
+  )
+(define-scmc-global fdtd-kernel-vec-args '())
+(define-scmc-global fdtd-kernel-out-args 
+  (map 
+    (lambda (f)
+      ;(write fdtd-kernel-vec-args current-error-port) (newline current-error-port)
+      (set! fdtd-kernel-vec-args (cons '() fdtd-kernel-vec-args))
+      (let loop ((n 2) (f f) (m 10))
+	(cond
+	  ((> n 0) (loop (- n 1) (cdr f) m))
+	  ((and (> m 0) (pair? f))
+	    (define carf (car f))
+	    (cond
+	      ((and (pair? carf) (pair? (car carf)) (eq? (car (reverse (car carf))) '*))
+		;(write carf current-error-port) (newline current-error-port)
+		(set-car! fdtd-kernel-vec-args (cons (cons (caar carf) (cdr carf)) (car fdtd-kernel-vec-args)))
+		(loop n (cdr f) m)
+		)
+	      (else 
+		(loop n (cdr f) (- m 1))
+		)
+	      )
+	    )
+	  (else
+	    (map (lambda (x) (cons (caar x) (cdr x))) f)
+	    )
+	  )
+	)
+      )
+    fdtd-kernel-args
+    )
+  )
+(eval-scmc-global (begin (set! fdtd-kernel-vec-args (reverse fdtd-kernel-vec-args)) '()))
+;(eval-scmc-global '(begin (write fdtd-kernel-vec-args current-error-port) (newline current-error-port)))
+(defmacro gen-kernel-set (name fixvars filename)
+  (if (eq? fixvars 'defaults) 
+    (set! fixvars '((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock)))
+    0)
+  (define allname (multi-concat name '-all-kernels))
+  `(eval-scmc-global 
+     (begin
+       (define ,allname (get-name-arg-env-pair ,filename))
+       (define ,(multi-concat name '-kernels) (map car ,allname))
+       (define ,(multi-concat name '-fix-vars) (quote ,fixvars))
+       ;(write ,(multi-concat name '-fix-vars) current-error-port) (newline)
+       (define ,(multi-concat name '-numele-args)
+	 (map 
+	   (lambda (x)
+	     (let loop ((allargs x))
+	       (cond
+		 ((null? allargs) '())
+		 ((isnumele (cadar allargs)) (cons (car allargs) (loop (cdr allargs))))
+		 (else (loop (cdr allargs)))
+		 )
+	       )
+	     ) (map cadr ,allname))
+	 )
+       (define ,(multi-concat name '-seq-args)
+	   (map 
+	     (lambda (x)
+	       (apply append
+		 (map 
+		   (lambda (y)
+		     ;(write y current-error-port) (newline current-error-port)
+		     (cond
+		       ((and (eq? '* (car (reverse (car y)))) (eq? (caar y) 'double )) 
+			 (list (list 'Field3D_Seq* (cadr y))))
+		       (else '())
+		       )
+		     ) x)
+		 )
+	       ) (map cadr ,allname)) 
+	 )
+       (define ,(multi-concat name '-kernel-extra-args) 
+	 (map 
+	   (lambda (x)
+	     (let loop 
+	       ((args (reverse (cadr x))))
+	     	;(write args current-error-port) (newline current-error-port)
+	       
+	       (multi-define type name (car args))
+	       (cond
+		 ((isnumele name) '())
+		 (else (cons (car args) (loop (cdr args))))
+		 ))
+	     ;(write opt1 current-error-port) (newline current-error-port)
+	     ) 
+	   ,allname)
+	 ) '())
+     )
+  )
+(defmacro gen-array-funs-maps (name ker-var-name fix-vec-vars prevfun mpifun . nar)
+  (define n0 nar)
+  (if (null? n0) (set! n0 0) (set! n0 (car n0)))
+  `(let ((n (- ,n0 1)))
+     (map 
+       (lambda (ker-name numele-paras seq-args extr-args) 
+	 (incf! n)
+	 ;(write fix-vars current-error-port) (newline current-error-port)
+	 (gen-multi-array-fun ,(list 'quote ker-var-name) n 'numvec ker-name numele-paras ,(concat name '-fix-vars) ,(list 'quote fix-vec-vars)
+	   (lambda () 
+	     ,(list 'quasiquote prevfun))
+	   (lambda ()
+	     ,(list 'quasiquote mpifun) 
+	     )
+	   seq-args extr-args
+	   )) . ,(map (lambda (x) (concat name x)) '(-kernels -numele-args -seq-args -kernel-extra-args))))
+  )
+(defmacro gen-local-array-funs (name name_kernels sync_fields)
+  `(gen-array-funs-maps ,name ,name_kernels ()
+     (begin 
+       (define XLEN xlen)
+       (define YLEN ylen)
+       (define ZLEN zlen)
+       (define-long y_cpu_core numvec)
+       )
+     ,(begin-map
+	(lambda (x)
+	  `(sync_ovlp_mpi_field ,x)
+	  ) sync_fields
+	)
+     )
+  )
+(define-scmc-global gen-array-funs 
+  (lambda (array-funs name_lfx)
+    (define newname (multi-concat 'alloc_Field3D_Seq_ name_lfx))
+    ;(write runtimes current-error-port) (newline current-error-port)
+    `(begin 
+       ,(begin-map (lambda (x) ((caddr x))) array-funs)
+       ,(begin-map
+	  (lambda (rt)
+	    (set! rt (car rt))
+	    `(begin
+	       (defun-class-Field3D_Seq ,(multi-concat rt newname) int ((int is_init_kernels))
+		 (if is_init_kernels
+		   ,(begin-map (lambda (x) ((car x) rt)) array-funs))
+		 (return 0)
+		 )
+	       ,(begin-map (lambda (x) ((cadr x) rt)) array-funs))
+	    ) runtimes)
+       (defun-class-Field3D_Seq ,newname int ((int is_init_kernels))
+	 (choose_the_runtime (,newname pthis is_init_kernels))
+	 (return 0)
+	 )
+       ))
+  )
+;(gen-kernel-set dm ((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock)) "dm.kernel.def.ss")
+;(eval-scmc-global (write fdtd_kernels current-error-port) (newline current-error-port))

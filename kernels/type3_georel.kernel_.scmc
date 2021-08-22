@@ -1,0 +1,626 @@
+
+(input-scmc "../general_macros.scmc")
+;(include< "stdio.h")
+(input-include "local_header.h")
+(input-scmc "../simd_intrin_config.scmc")
+(input-scmc "../particle_macros.scmc")
+(define-scmc-global gen-genpushkernel-goto 
+  (lambda (num-call-stack use-smallgrid sort_fun use-grid)
+    (define pre_def (lambda x '()))
+    (define sort_cu (lambda x '()))
+    (define sort_grid (lambda x '()))
+    (if (pair? sort_fun)
+      (begin
+	(set! pre_def (car sort_fun))
+	(set! sort_cu (cadr sort_fun))
+	(set! sort_grid (caddr sort_fun))
+	(set! sort_fun #t)
+	)
+      (set! sort_fun #f)
+      )
+    (define num_lab 0)
+    (define (gen-lab)
+      (set! num_lab (+ num_lab 1))
+      (concat 'LAB_TMP (number->string num_lab))
+      )
+    (define (CALL lab)
+      (define thelab (gen-lab))
+      `(begin 
+	 ;(set! (vector-ref call_stack_pointer cur_frame_num) ("&" ("&" ,thelab)))
+	 (pure-text ,(multi-concat "\n\t call_stack_pointer[cur_frame_num]=&&" thelab ";\n"))
+	 (incf! cur_frame_num)
+	 (goto ,lab)
+	 (pure-text "\n")
+	 (label ,thelab)
+	 )
+      )
+    (define (RET)
+      `(begin
+	 (incf! cur_frame_num -1)
+	 (goto (* (vector-ref call_stack_pointer cur_frame_num)))
+	 )
+      )
+
+    (lambda (name vars gen_core_fun gen_prev_dec_fun . __xlen)
+      (define k_header '(defkernel))
+      (if (null? __xlen)
+	0
+	(set! k_header `(defkernel-with-xlen ,(car __xlen)))
+	)
+
+      (append k_header
+	`(,(if use-smallgrid (concat name '_small_grids) name) ,vars
+	   ,(if_isgpu
+	      '()
+	      `(begin
+		 (dec-local-array void* call_stack_pointer ,num-call-stack)
+		 (define-int cur_frame_num 0)
+		 (define numgrid (* XLEN YLEN ZLEN))
+		 (define numallgrid (* (+ XLEN ovlp ovlp) (+ YLEN ovlp ovlp) (+ ZLEN ovlp ovlp)))
+		 (define-long numgrid_cu (* numgrid numvec))
+		 ;(define-static-int dbg_state)
+		 (define-long grid_base_offset (* __idy numgrid grid_cache_len ,PARTICLE_LEN))
+		 (INIT_ASYNC_IO_LOCK cuload_id)
+		 (define-int cu_load (vector-ref cu_xyzw (* 4 __idy)))
+		 ;,(pre_def)
+
+		 ;funtion pre defined:
+		 (define-long load0 0)
+		 (define-double* particle_head_general)
+		 (define-long i_idy 0)
+		 ,(gen_prev_dec_fun CALL RET)
+		 (goto beg_prog)
+		 (label core_fun)
+		 ,(gen_core_fun 'particle_head_general CALL RET)
+		 ,(RET)
+
+		 (label beg_prog)
+
+		 ,(if use-smallgrid '(define-long allgid __idy) '())
+		 ,(append
+		    (if use-smallgrid `(for 0 (< allgid numvec) (incf! allgid __ylen) (define-int cu_load (vector-ref cu_xyzw (* 4 allgid)))) '(begin))
+		    (list
+		      (if use-grid
+			`(for-from-to l1 0 cu_load
+			   (set! load0 1)
+			   (define new_load load0)
+			   (set! i_idy __idy)
+			   ,(if use-smallgrid `(define __idy allgid) '())
+			   (set! particle_head_general (+ cu_cache (* ,(if use-smallgrid 'allgid '__idy) ,PARTICLE_LEN cu_cache_length) (* l1 ,PARTICLE_LEN)))
+			   ,(CALL 'core_fun)
+			   0
+			   )
+			`(begin 
+			   (set! load0 cu_load)
+			   (set! particle_head_general (+ cu_cache (* __idy ,PARTICLE_LEN cu_cache_length)))
+			   (set! i_idy ,(if use-smallgrid 'allgid '__idy))
+			   ,(CALL 'core_fun)
+			   )
+
+			)
+		      )
+		    )
+
+		 ;(sort_cu)
+
+		 ,(if use-grid 
+		    `(begin
+		       ,(if use-smallgrid `(set! allgid __idy) '())
+		       ,(append 
+			  (if use-smallgrid 
+			    `(for 0 (< allgid numgrid_cu) (incf! allgid __ylen) 
+			       (set! load0 (vrf xyzw (* 4 allgid)))
+			       (define-long __idy (/ allgid numgrid))
+			       )
+			    `(for-from-to allgid 0 numgrid
+			       (set! load0 (vrf xyzw (* 4 (+ (* __idy numgrid) allgid))))
+			       )
+			    )
+			  `(
+			     (define new_load load0)
+			     (set! particle_head_general (+ inoutput ,(if use-smallgrid 0 'grid_base_offset) (* ,PARTICLE_LEN allgid grid_cache_len)))
+			     (set! i_idy __idy)
+			     ,(CALL 'core_fun)
+			     ;(define load0 1)
+			     ;,(gen_core_fun `(+ inoutput ,(if use-smallgrid 0 'grid_base_offset) (* ,PARTICLE_LEN allgid grid_cache_len)) sort_fun)
+			     ;,(sort_grid)
+			     (if (neq? load0 new_load)
+			       (set! (vrf xyzw (* 4 (+ ,(if use-smallgrid 0 `(* __idy numgrid)) allgid))) new_load)
+			       )
+			     )))
+		    '()
+		    )))
+	   
+	   
+	   )
+	)
+      )
+    ))
+
+(eval-scmc-global
+  (begin
+    (load "../decscheme.ss")
+    (load "../multi-map.ss")
+    (load "../Bproc_macros.scmc")
+    (load "../relng.ss")
+    (define num_stack_max 8)
+    (define rel_vars '((double* inoutput) (int* xyzw) (double* cu_cache) (int* cu_xyzw) (int* xoffset) (int* yoffset) (int* zoffset) (double* fieldE) (double* fieldB) (double* fieldB1) (double* FoutJ) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double DELTA_X) (double DELTA_Y) (double DELTA_Z) (double Mass0) (double Charge0 ) (double Deltat) (double Tori_X0) (double Solve_Err)))
+    (define rel_vars_smallgrid (replace-all rel_vars 'FoutJ 'LFoutJ))
+    (define (kernel_gen_imifun_type3 rel_file addJ use_small_grid use_tori . floorx )
+      (define tflx (if (null? floorx) 'mass_floorx (car floorx)))
+      (load rel_file)
+      `(begin
+	 (define-scalar-double maxerr 0.0)
+	 )
+      )
+    (define (remove-B-macros setvar expr)
+      (multi-define iBs rst (find-intBs expr))
+
+      (cond
+	((null? iBs) `(set! ,setvar ,rst))
+	(else
+	  `(block
+	     ,(begin-map 
+		(lambda (x) 
+		  (define funname (car x))
+		  (define args (cdr x))
+		  (define tmparg (apply multi-concat x))
+		  `(begin
+		     (define-double ,tmparg) 
+		     ,(cons (multi-concat funname '_pc) (append args (list tmparg)))
+		     ;(fprintf stderr ,(multi-concat "" tmparg "=%e\n") ,tmparg)
+		     )
+
+		  ) iBs)
+	     (set! ,setvar ,rst)
+	     )
+	  )
+	)
+      )
+    (define genpush-kernel-goto (gen-genpushkernel-goto 4 #f #f #t))
+    `(begin
+       (defun get_E1_local_opt double ((double* shE0) (double* f1_x) (double* f0_y) (double* f0_z) (int dir) (int l_dir))
+	 (define-double sum0 0.0)
+	 (define-double* ftmp)
+	 (if (eq? dir 1) 
+	   (begin
+	     (set! ftmp f0_y)
+	     (set! f0_y f1_x)
+	     (set! f1_x f0_z)
+	     (set! f0_z ftmp)
+	     )
+	   (if (eq? dir 2)
+	     (begin
+	       (set! ftmp f0_y)
+	       (set! f0_y f0_z)
+	       (set! f0_z f1_x)
+	       (set! f1_x ftmp)
+	       )
+	     )
+	   )
+	 
+	 (fffor-xyz-from-zero-to 5 5 5
+	   (define-int allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz)))))
+	     (incf! sum0 
+	       (* (vrf shE0 (+ (* allidx 3) l_dir))
+		 (vrf f1_x xyzx) (vrf f0_y xyzy) (vrf f0_z xyzz))
+	       )
+	   )
+	 (return sum0)
+	 )
+       (defun get_B1_local_opt double ((double* shB0) (double* if1_x) (double* if1_xplus) (double* f1_y) (double* f0_z) (int dir) (int l_dir))
+	 (define-double sum0 0.0)
+	 (cond
+	   ((eq? dir 0)
+	     (fffor-xyz-from-zero-to 5 5 5
+	       (declare-scalar-int allidx)
+	       (set! allidx
+		 (+ xyzx (* 5 (+ xyzy (* 5 xyzz))))
+		 ) 
+	       (incf! sum0 
+		 (* (vrf shB0 (+ (* allidx 3) l_dir))
+		   (- (vrf if1_xplus xyzx) (vrf if1_x xyzx)) (vrf f1_y xyzy) (vrf f0_z xyzz))
+		 )
+	       )
+	     )
+	   ((eq? dir 1)
+	     (fffor-xyz-from-zero-to 5 5 5
+	       (declare-scalar-int allidx)
+	       (set! allidx
+		 (+ xyzz (* 5 (+ xyzx (* 5 xyzy))))
+		 ) 
+	       (incf! sum0 
+		 (* (vrf shB0 (+ (* allidx 3) l_dir))
+		   (- (vrf if1_xplus xyzx) (vrf if1_x xyzx)) (vrf f1_y xyzy) (vrf f0_z xyzz))
+		 )
+	       )
+	     )
+	   ((eq? dir 2)
+	     (fffor-xyz-from-zero-to 5 5 5
+	       (declare-scalar-int allidx)
+	       (set! allidx
+		 (+ xyzy (* 5 (+ xyzz (* 5 xyzx))))
+		 ) 
+	       (incf! sum0 
+		 (* (vrf shB0 (+ (* allidx 3) l_dir))
+		   (- (vrf if1_xplus xyzx) (vrf if1_x xyzx)) (vrf f1_y xyzy) (vrf f0_z xyzz))
+		 )
+	       )
+	     )
+	   )
+	 
+	 (return sum0)
+	 )
+       ,(begin-map 
+	  (lambda (name offset useone maxn)
+	    `(defun ,(multi-concat 'cal_fun_ name) void ((double* outf) (double x) (int ix))
+	       ,(if useone
+		  `(begin
+		     (vector-set! outf 0 1)
+		     (vector-set! outf 1 1)
+		     (vector-set! outf 3 0)
+		     (vector-set! outf 4 0)
+		     )
+		  `(for-from-zero-to i 5 (vector-set! outf i 0))
+		  ) 
+	       (begin .
+		 ,(let loop ((n 0))
+		    (if (< n maxn)
+		      (begin
+			(cons
+			  `(vector-set! outf (+ ,n ix ,(if (eq? maxn 4) 1 1)) ,(eval (list (concat 'fl (number->string (+ n offset))) (list 'quote 'x))))
+			  (loop (+ n 1))
+			  )
+			)
+		      '()
+		      )
+		    ))
+	       )
+	    ) 
+	  `(f0 f1 if1 df0 dif1) '(0 4 7 10 14) '(#f #f #t #f #f) '(4 3 3 4 3)
+	  )
+       ,(genpush-kernel-goto 'relng_1st_goto rel_vars 
+	  (lambda (particle_head CALL RET)
+	    ;(define tflx (if (null? floorx) 'mass_floorx (car floorx)))
+	    (define use_small_grid #f)
+	    (define use_tori #f)
+	    (define tflx 'floor)
+	    (define gen-newton-goto
+	      (lambda (vars res-all jac-all zmax solve-err)
+		(define numdim (vector-length vars))
+		(define numdim-jac (* numdim numdim))
+		(define vars-list (vector->list vars))
+		(define (CALL_MAXERR val n)
+		  `(begin
+		     (set! maxerr 0)
+		     (inner-for-from-to i 0 ,n
+		       (define-double absvalv (fabs (vector-ref ,val i)))
+		       (define-scalar-double absval (reduce fmax absvalv))
+		       (set! maxerr (if (> absval maxerr) absval maxerr))
+		       )
+		     )
+		  )
+		(define (seq n)
+		  (let loop ((n0 0) (l0 '()))
+		    (cond
+		      ((eq? n0 n) (reverse l0))
+		      (else
+			(loop (+ n0 1) (cons n0 l0))
+			)
+		      )
+		    )
+		  )
+		(define (CALL_INV_JAC opt inp numdim) ;currently only 3x3 matrix is supported
+		  (optload "../matinv.ss")
+		  (define numall (* numdim numdim))
+		  `(block 
+		     (begin . 
+		       ,(multi-map 
+			  (lambda (i j) 
+			    `(define-double 
+			       ,(multi-concat 'r (number->string i) (number->string j)) (vector-ref ,inp ,(+ j (* i numdim))))
+			    )
+			  (seq numdim) (seq numdim)
+			  )
+		       )
+		     (define-double jactmp (/ 1  ,(eval (list (multi-concat 'fl (number->string numall)) 0))))
+		     ;(LOG_RECORD_INFO "det=%e\n" jactmp)
+		     (begin .
+		       ,(multi-map 
+			  (lambda (i j)
+			    `(force-simd-ver
+			       (vector-set! ,opt ,(+ (* i numdim) j) (* jactmp ,(eval (list (multi-concat 'fl (number->string (+ j (* i numdim)))) 0))))
+			       ;(LOG_RECORD_INFO "invjac=%e\n" (vrf ,opt ,(+ (* i numdim) j)))
+			       )
+			    )
+			  (seq numdim) (seq numdim)
+			  )
+		       )
+		     )
+		  )
+		(define (CALL_MAT_MV lres res ijac numdim)
+		  (begin-map
+		    (lambda (n)
+		      `(force-simd-ver
+			 (vector-set! ,lres ,n
+			   (+ . ,(map (lambda (j) `(* (vector-ref ,ijac ,(+ j (* n numdim))) (vector-ref ,res ,j))) (seq numdim)))
+			   ))
+		      ) 
+		    (seq numdim)
+		    )
+		  )
+		(define (CALL_VEC_SUB x y z numdim)
+		  (begin-map
+		    (lambda (n)
+		      `(force-simd-ver
+			 (set! ,(vector-ref x n) (- ,(vector-ref y n) (vector-ref ,z ,n))))
+		      ) (seq numdim)
+		    )
+		  )
+		(define (gen-x2-vec-set)
+		  `(begin 
+		     ,(if use_tori
+			`(begin 
+			   ,(remove-B-macros 'RPL00 (flr15 0))
+			   ,(remove-B-macros 'RPL10 (flr16 0))
+			   ,(remove-B-macros 'RPL20 (flr17 0))
+			   )
+			'()
+			)
+		     (block
+		       (define-int Midx2 (,tflx X2))
+		       (define-int Midy2 (,tflx Y2))
+		       (define-int Midz2 (,tflx Z2))
+		       (define-double rx2 (- X2 Midx2))
+		       (define-double ry2 (- Y2 Midy2))
+		       (define-double rz2 (- Z2 Midz2))
+		       (define-int ixx2 (- Midx2 Midx))
+		       (define-int ixy2 (- Midy2 Midy))
+		       (define-int ixz2 (- Midz2 Midz))
+
+		       (begin . 
+			 ,(multi-map
+			    (lambda (xyz x01 f01)
+			      (define strx01 (number->string x01))
+			      `(,(multi-concat 'cal_fun_ f01) ,(multi-concat f01 '_ xyz strx01) ,(multi-concat 'r xyz strx01) ,(multi-concat 'ix xyz strx01))
+			      )
+			    '(x y z) '(2) '(f0 f1 if1 df0 dif1)
+			    )))
+
+		     )
+		  )
+		(define (CALL_GEN_VEC var val . isn-genx2)
+		  `(begin 
+		     ,(if (null? isn-genx2) (gen-x2-vec-set) '())
+		     . 
+		     ,(let loop ((n 0) (val val))
+			(cond
+			  ((null? val) '())
+			  (else
+			    (cons
+			      `(begin 
+				 ;(force-simd-ver)
+				 ,(remove-B-macros `(vector-ref ,var ,n) (car val))
+				 ;(if (isnormal (vrf ,var ,n)) () (LOG_RECORD_INFO "%s[%d]=%e\n"  ,(symbol->string var) ,n (vrf ,var ,n)))
+				 )
+			      (loop (+ n 1) (cdr val))
+			      )
+			    )
+			  )
+			)
+		     )
+		  )
+		`(block
+		   (define-scalar-double maxerr 0.0)
+		   (dec-array double RES ,numdim)
+		   (dec-array double L_RES ,numdim)
+		   (dec-array double JAC ,numdim-jac)
+		   (dec-array double IJAC ,numdim-jac)
+		   (define-double RPL00)
+		   (define-double RPL10)
+		   (define-double RPL20)
+		   (inner-for-from-to z 0 ,zmax 
+		     ,(CALL_GEN_VEC 'RES (vector->list res-all))
+		     ,(CALL_MAXERR 'RES numdim)
+		     ;(LOG_RECORD_INFO "r2=[%.15e %.15e %.15e], err=[%e %e %e], z=%d g=%d\n" X2 Y2 Z2 (vrf RES 0) (vrf RES 1) (vrf RES 2) z g)
+		     (force-scalar-ver (if (< maxerr ,solve-err) break))
+		     ,(CALL_GEN_VEC 'JAC (vector->list jac-all) #f)
+		     ,(CALL_INV_JAC 'IJAC 'JAC numdim)
+		     ;(for-from-to i 0 9 (LOG_RECORD_DEBUG "%.15e " (vrf JAC i))) (LOG_RECORD_DEBUG "\n")
+		     ,(CALL_MAT_MV 'L_RES 'RES 'IJAC numdim)
+		     ,(CALL_VEC_SUB (vector 'X2 'Y2 'Z2) (vector 'X2 'Y2 'Z2) 'L_RES numdim)
+		     )
+
+
+
+		   )
+
+		)
+	      )
+	    `(begin 
+	       (if load0
+		 (begin
+		   (INIT_ASYNC_IO_LOCK get_sync_id)
+		   (INIT_ASYNC_IO_LOCK get_j_sync_id)
+		   (INIT_ASYNC_IO_LOCK put_sync_id)
+
+		   (set! XO (vrf xoffset i_idy))
+		   (define-int Midx (,tflx (vrf ,particle_head 0)))
+		   (define-int Midy (,tflx (vrf ,particle_head 1)))
+		   (define-int Midz (,tflx (vrf ,particle_head 2)))
+		   (define-int Bidx (- Midx 2))
+		   (define-int Bidy (- Midy 2))
+		   (define-int Bidz (- Midz 2))
+
+		   (define Mass 1.0)
+		   (define Charge (/ Charge0 Mass0) )
+
+		   (fffor-xyz-from-zero-to 1 5 5
+		     (define-int total_idx (* 3 5 (+ xyzy (* 5 xyzz))))
+		     (parallel-get-memory (+ shE0 total_idx) (+ fieldE  (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		     (parallel-get-memory (+ shB0 total_idx) (+ fieldB  (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		     (parallel-get-memory (+ shB1 total_idx) (+ fieldB1 (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		     ,(case use_small_grid 
+			(#t '())
+			(2
+			  `(parallel-get-memory (+ shJ0 total_idx) (+ LFoutJ (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0 (* num_ele pscmc_num_compute_units) num_ele) (* num_ele numallgrid pscmc_compute_unit_id)) (* 3 5) get_sync_id)
+			  )
+			(else
+			  `(parallel-get-memory (+ shJ0 total_idx) (+ FoutJ (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+			  )
+			)
+		     )
+
+
+		   ,(if (eq? use_small_grid #t)
+		      `(parallel-get-memory shJ0 (+ LFoutJ (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz 0 0 375)) 375 get_sync_id) '())
+
+		   ,(if_isgpu
+		      `(begin 
+			 (for-from-to lg 0 375
+			   (vector-set! shJ1 (+  (* lg IDX_LOCAL_XLEN) __idx) 0)
+			   )
+			 ) '())
+		   (WAIT_SPARSE_MEMORY get_sync_id)
+		   (sync-local)
+		   ,(gen_long_for_opt_loop 'g 0 'load0 `((double local_particle_head ,particle_head ,PARTICLE_LEN)) PAR_CACHE_LEN #t
+		      `(begin
+			 (define-double vx0 (vrf local_particle_head 3))
+			 (define-double vy0 (vrf local_particle_head 4))
+			 (define-double vz0 (vrf local_particle_head 5))
+			 (define-double xx1 (- (vrf local_particle_head 0) 0.5))
+			 (define-double xy1 (- (vrf local_particle_head 1) 0.5))
+			 (define-double xz1 (- (vrf local_particle_head 2) 0.5))
+			 (define-double xx0 (- xx1 (* Deltat vx0)))
+			 (define-double xy0 (- xy1 (* Deltat vy0)))
+			 (define-double xz0 (- xz1 (* Deltat vz0)))
+			 (define-double Midx0 (,tflx xx0))
+			 (define-double Midy0 (,tflx xy0))
+			 (define-double Midz0 (,tflx xz0))
+			 (define-double Midx1 (,tflx xx1))
+			 (define-double Midy1 (,tflx xy1))
+			 (define-double Midz1 (,tflx xz1))
+			 (define-int ixx0 (- Midx0 Midx))
+			 (define-int ixy0 (- Midy0 Midy))
+			 (define-int ixz0 (- Midz0 Midz))
+			 (define-int ixx1 (- Midx1 Midx))
+			 (define-int ixy1 (- Midy1 Midy))
+			 (define-int ixz1 (- Midz1 Midz))
+			 (define rx0 (- xx0 Midx0))
+			 (define ry0 (- xy0 Midy0))
+			 (define rz0 (- xz0 Midz0))
+			 (define rx1 (- xx1 Midx1))
+			 (define ry1 (- xy1 Midy1))
+			 (define rz1 (- xz1 Midz1))
+			 (set! X0 xx0)
+			 (set! X1 xx1)
+			 (set! Y0 xy0)
+			 (set! Y1 xy1)
+			 (set! Z0 xz0)
+			 (set! Z1 xz1)
+			 ;,(begin-map (lambda (x) (define itgx (concat 'i x)) (define xyz (list->string (list (cadr (string->list (symbol->string x)))))) ;(write x current-error-port) (newline current-error-port) `(begin (define-int ,itgx (if (>= ,x ,(concat 'Mid xyz)) 1 0)))) '(xx0 xy0 xz0 xx1 xy1 xz1))
+			 (begin . 
+			   ,(multi-map
+			     (lambda (xyz x01 f01)
+			       (define strx01 (number->string x01))
+			       `(,(multi-concat 'cal_fun_ f01) ,(multi-concat f01 '_ xyz strx01) ,(multi-concat 'r xyz strx01) ,(multi-concat 'ix xyz strx01))
+			       )
+			     '(x y z) '(0 1) '(f0 f1 if1)
+			     ))
+			 (define Ex1 (get_E1_local_opt shE0 f1_x1 f0_y1 f0_z1 0 0))
+			 (define Ey1 (get_E1_local_opt shE0 f1_y1 f0_z1 f0_x1 1 1))
+			 (define Ez1 (get_E1_local_opt shE0 f1_z1 f0_x1 f0_y1 2 2))
+			 (define-static-int i0 0)
+			 ;(exit 0)
+			 (declare-double Resx Resy Resz)
+			 ,(remove-B-macros 'Resx (eval '(flr1 0)))
+			 ,(remove-B-macros 'Resy (eval '(flr6 0)))
+			 ,(remove-B-macros 'Resz (eval '(flr11 0)))
+			 ;(if Tori_X0 (begin (fprintf stderr "Ra=[%.15e %.15e %.15e]\n" Resx Resy Resz) (fprintf stderr "Ea=[%.15e %.15e %.15e]\n" Ex1 Ey1 Ez1) (fprintf stderr "Es=[%e %e %e %e %e]\n" (vrf f1_x1 0) (vrf f1_x1 1) (vrf f1_x1 2) (vrf f1_x1 3) (vrf f1_x1 4)) (fprintf stderr "X1=[%e %e %e]\n" X1 Y1 Z1) (exit 0)))
+			 ;(incf! i0)
+			 ;(if i0>11 (exit 0))
+
+			 (set! X2 (- (* 2 xx1) xx0))
+			 (set! Y2 (- (* 2 xy1) xy0))
+			 (set! Z2 (- (* 2 xz1) xz0))
+			 ,(begin
+			    (define lhs-all (vector (flr0 0) (flr5 0) (flr10 0))) 
+			    (define res-all-lst (map (lambda (x y) `(+ ,x ,y)) (vector->list lhs-all) '(Resx Resy Resz))) 
+			    (define jac-all (vector (flr2 0) (flr3 0) (flr4 0) (flr7 0) (flr8 0) (flr9 0) (flr12 0) (flr13 0) (flr14 0)))
+			    (gen-newton-goto (list->vector '(X2 Y2 Z2)) (list->vector res-all-lst) jac-all 32 'Solve_Err)
+			    )
+			 (vector-set! local_particle_head 0 (+ X2 0.5))
+			 (vector-set! local_particle_head 1 (+ Y2 0.5))
+			 (vector-set! local_particle_head 2 (+ Z2 0.5))
+			 (vector-set! local_particle_head 3 (/ (- X2 xx1) Deltat))
+			 (vector-set! local_particle_head 4 (/ (- Y2 xy1) Deltat))
+			 (vector-set! local_particle_head 5 (/ (- Z2 xz1) Deltat))
+			 (block 
+		   (fffor-xyz-from-zero-to 5 5 5 
+		     (declare-scalar-int (allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz)))))) 
+		     ;(if (and xyzx==1 xyzy==1 xyzz==1) (begin (LOG_RECORD_DEBUG "out=%ld\n" (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz 0 0 375)) (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz 0 0 375))) 
+			 ,(INCFJ0_RELNG #f)
+		     ;,(addJ use_small_grid)
+		     )
+		   )
+
+			 )
+		      )
+		   (begin 
+		     (fffor-xyz-from-zero-to 1 5 5 
+		       (define-int total_idx (* 3 5 (+ xyzy (* 5 xyzz)))) 
+		       ,(case 0 ;use_small_grid
+			  (2
+			    `(parallel-put-memory (+ LFoutJ (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0 (* num_ele pscmc_num_compute_units) num_ele) (* num_ele numallgrid pscmc_compute_unit_id)) (+ shJ0 total_idx) (* 3 5) put_sync_id)
+			    )
+			  (else
+			    `(parallel-put-memory (+ FoutJ (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (+ shJ0 total_idx) (* 3 5) put_sync_id)
+			    )))
+		     (WAIT_SPARSE_MEMORY put_sync_id))
+		   )
+		 )
+	       )
+	    )
+	  (lambda (CALL RET) 
+	    (define use_tori #f)
+	    `(begin 
+	       (define DELTAT Deltat)
+	       (define-double grid_geo_x (/ DELTA_X (* DELTA_Y DELTA_Z)))
+	       (define-double grid_geo_y (/ DELTA_Y (* DELTA_Z DELTA_X)))
+	       (define-double grid_geo_z (/ DELTA_Z (* DELTA_X DELTA_Y)))
+	       (declare-double XO X0 X1 X2 Y0 Y1 Y2 Z0 Z1 Z2 )
+	       ,(defJ01)
+	       (begin . 
+		 ,(multi-map
+		    (lambda (f01 xyz x012)
+		      (define str012 (number->string x012))
+		      (define arrname (multi-concat f01 '_ xyz str012))
+		      ;`(pure-text ,(multi-concat "\n double " arrname "[5]={0};\n"))
+		      `(begin 
+			 (dec-array double ,arrname 5) 
+			 ;(inner-for-from-to i 0 5 (vector-set! ,arrname i 0))
+			 )
+		      )
+
+		    '(f0 f1 if1) '(x y z) '(0 1))
+		 )
+	       (begin .
+		 ,(multi-map 
+		    (lambda (f01 xyz x012)
+		      (define str012 (number->string x012))
+		      (define arrname (multi-concat f01 '_ xyz str012))
+		      `(begin
+			 (dec-array double ,arrname 5)
+			 ;(inner-for-from-to i 0 5 (vector-set! ,arrname i 0))
+			 )
+		      )
+		    '(f0 f1 if1 df0 dif1) '(x y z) '(2))
+		 )
+
+	       ;,(if use_tori '())
+	       )) IDX_LCL_SPEC_LEN
+	  ))
+
+
+    )
+  )

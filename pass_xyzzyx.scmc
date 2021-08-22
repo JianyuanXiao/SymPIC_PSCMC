@@ -1,0 +1,204 @@
+;paravec.scmc general_macros.scmc
+(include< "stdio.h")
+(include< "stdlib.h")
+(include- "cfgcst.h")
+
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(include< "math.h")
+(include< "cgapsio.h")
+(include- "blas_shell.h")
+(include< "cgapsio.h")
+(include- "mpi_fieldio.h")
+(include- "run_particle.h")
+(include- "run_particle_call_fun.h")
+(include- "sync_fields.h")
+(include- "sort_particle.h")
+
+(dec-fun wclk_now double ())
+(define-FILE* parfp NULL)
+(defun-class-Particle_in_Cell_MPI split_pass_xyz_zyx_mpi_shell int ((double dt0) (int xyzzyx) (int merge_J))
+  (define-double curt_profile_only (wclk_now))
+  (blas_yiszero_synced_Field3D_MPI pMPI_FoutJ pMPI_FoutJ)
+  (PERFORMANCE_TIME "set J zero")
+  ;(sync_ovlp_mpi_field pMPI_FoutJ)
+  ;(PERFORMANCE_TIME "sync J")
+  (cond
+    ((eq?  use_small_grid 1)
+      (blas_yiszero_Field3D_MPI ("&" pthis->MPI_LFoutJ) ("&" pthis->MPI_LFoutJ)))
+    ((eq? use_small_grid 2)
+      (blas_yiszero_synced_Field3D_MPI ("&" pthis->MPI_LFoutJ) ("&" pthis->MPI_LFoutJ)) 
+      )
+    )
+  (if (eq? USE_FILTER 3)
+    (begin
+      (blas_yisax_Field3D_MPI ("&" pthis->MPI_fieldEtmp1) ("&" pthis->MPI_fieldEtmp1) 1 ("&" pthis->MPI_fieldE))
+      (blas_yisax_Field3D_MPI ("&" pthis->MPI_fieldBtmp1) ("&" pthis->MPI_fieldBtmp1) 1 ("&" pthis->MPI_fieldB))
+      )
+    )
+  (if (eq? USE_FILTER 1)
+    (begin
+      (blas_mulxy_Field3D_MPI ("&" pthis->MPI_fieldE) ("&" pthis->MPI_fieldE) ("&" pthis->MPI_fieldE_filter))
+      (sync_ovlp_mpi_field ("&" pthis->MPI_fieldE))
+      (blas_mulxy_Field3D_MPI ("&" pthis->MPI_fieldB) ("&" pthis->MPI_fieldB) ("&" pthis->MPI_fieldB_filter))
+      (sync_ovlp_mpi_field ("&" pthis->MPI_fieldB))
+
+      )
+    )
+  (if (eq? USE_FILTER 3)
+    (begin
+      (blas_axpy_Field3D_MPI ("&" pthis->MPI_fieldEtmp1) ("&" pthis->MPI_fieldEtmp1) -1 ("&" pthis->MPI_fieldE))
+      (blas_axpy_Field3D_MPI ("&" pthis->MPI_fieldBtmp1) ("&" pthis->MPI_fieldBtmp1) -1 ("&" pthis->MPI_fieldB))
+      )
+    )
+
+  (if USE_INIT_EXT_EB
+    (begin
+      ;(blas_axpy_Field3D_MPI ("&" MPI_fieldE ) ("&" MPI_fieldE ) 1. ("&" MPI_fieldE_ext))
+      (blas_axpy_Field3D_MPI ("&" MPI_fieldB ) ("&" MPI_fieldB ) 1. ("&" MPI_fieldB_ext)))
+    )
+
+  (sync_ovlp_mpi_field ("&" MPI_fieldB))
+  ;(sync_ovlp_mpi_field ("&" MPI_fieldE))
+
+  (PERFORMANCE_TIME "sync EB")
+  ;(if (not parfp) (set! parfp (fopen "dbgPar" "w"))) (dump_particles pthis parfp)
+  ;(exit 0)
+  (cond
+    (xyzzyx
+      ;(LOG_RECORD_INFO "ok here bef x\n")
+      ;(split_pass_x_mpi pthis dt0)
+
+      (if 1
+	(begin
+	  (split_pass_x_mpi_multi_runtime pthis dt0 )
+	  (PERFORMANCE_TIME "Pass X")
+	  (call_particle_sort_mpi pthis 0 use_vlo)
+	  (PERFORMANCE_TIME "Sort X")
+	  (split_pass_y_mpi_multi_runtime pthis dt0 )
+	  (PERFORMANCE_TIME "Pass Y")
+	  (call_particle_sort_mpi pthis 1 use_vlo)
+	  (PERFORMANCE_TIME "Sort Y")
+	  (split_pass_z_mpi_multi_runtime pthis dt0 )
+	  (PERFORMANCE_TIME "Pass Z")
+	  (call_particle_sort_mpi pthis 2 use_vlo)
+	  (PERFORMANCE_TIME "Sort Z")
+	  (if (and use_small_grid merge_J )
+	    (case use_small_grid
+	      (1
+		(MPI_merge_current pMPI_FoutJ ("&" pthis->MPI_LFoutJ))
+		)
+	      (2
+		(MPI_merge_current_2 pMPI_FoutJ ("&" pthis->MPI_LFoutJ))
+		)
+	      (else 0)
+	      ))
+	  )
+	(begin
+	  (LOG_RECORD_INFO "beg dump\n")
+	  (define-FILE* fp)
+	  (set! fp (fopen "dbg00" "wb"))
+	  (dump_particles ("&" pthis->MPI_fieldE) fp)
+	  (fclose fp)
+	  (split_pass_x_mpi_multi_runtime pthis dt0 )
+	  (set! fp (fopen "dbg01" "wb"))
+	  (dump_particles ("&" pthis->MPI_fieldE) fp)
+	  (fclose fp)
+	  (LOG_RECORD_INFO "aft spl dump\n")
+	  (call_particle_sort_mpi pthis 0 use_vlo)
+	  (LOG_RECORD_INFO "aft splx\n")
+	  (set! fp (fopen "dbg01a" "wb"))
+	  (dump_particles ("&" pthis->MPI_fieldE) fp)
+	  (fclose fp)
+	  (split_pass_y_mpi_multi_runtime pthis dt0 )
+	  ;(set! fp (fopen "dbg02" "wb"))
+	  ;(dump_particles ("&" pthis->MPI_fieldE) fp)
+	  ;(fclose fp)
+	  (call_particle_sort_mpi pthis 1 use_vlo)
+	  (LOG_RECORD_INFO "aft sply\n")
+	  (set! fp (fopen "dbg02a" "wb"))
+	  (dump_particles ("&" pthis->MPI_fieldE) fp)
+	  (fclose fp)
+	  (split_pass_z_mpi_multi_runtime pthis dt0 )
+	  ;(set! fp (fopen "dbg03" "wb"))
+	  ;(dump_particles ("&" pthis->MPI_fieldE) fp)
+	  ;(fclose fp)
+	  (call_particle_sort_mpi pthis 2 use_vlo)
+	  (LOG_RECORD_INFO "aft splz\n")
+	  (set! fp (fopen "dbg03a" "wb"))
+	  (dump_particles ("&" pthis->MPI_fieldE) fp)
+	  (fclose fp)
+	  (decl-var-and-pvar Gaps_IO_DataFile gid)
+	  (if (and use_small_grid merge_J)
+	    (begin
+	      (case use_small_grid
+		(1
+		  (MPI_merge_current pMPI_FoutJ ("&" pthis->MPI_LFoutJ))
+		  )
+		(2
+		  (MPI_merge_current_2 pMPI_FoutJ ("&" pthis->MPI_LFoutJ))
+		  )
+		(else ())
+		)
+	      ;(merge_ovlp_mpi_field pMPI_FoutJ)
+	      (sync_main_data_d2h pMPI_FoutJ)
+	      (sync_main_data_d2h ("&" pthis->MPI_LFoutJ))
+	      (init_parallel_file_for_mpi_fields pMPI_FoutJ pgid "tmpJ1" -1 0 0)
+	      (mpi_field_write_to_file pMPI_FoutJ pgid 0)
+	      (init_parallel_file_for_mpi_fields ("&" pthis->MPI_LFoutJ) pgid "tmpJdbg" -1 0 0)
+	      (mpi_field_write_to_file ("&" pthis->MPI_LFoutJ) pgid 0)
+	      (LOG_RECORD_INFO "end dump\n")
+	      ))
+
+	  ;(PS_MPI_Barrier PS_MPI_COMM_WORLD)
+	  ;(exit 0)
+
+	  )
+	)
+      )
+    (else
+      (split_pass_z_mpi_multi_runtime pthis dt0 )
+      (call_particle_sort_mpi pthis 2 use_vlo)
+      (split_pass_y_mpi_multi_runtime pthis dt0 )
+      (call_particle_sort_mpi pthis 1 use_vlo)
+      (split_pass_x_mpi_multi_runtime pthis dt0 )
+      (call_particle_sort_mpi pthis 0 use_vlo)
+      (if (and use_small_grid merge_J )
+	(case use_small_grid
+	  (1
+	    (MPI_merge_current pMPI_FoutJ ("&" pthis->MPI_LFoutJ))
+	    )
+	  (2
+	    (MPI_merge_current_2 pMPI_FoutJ ("&" pthis->MPI_LFoutJ))
+	    )
+	  (else 0)
+	  ))
+      )
+    )
+  (if merge_J
+  (merge_ovlp_mpi_field pMPI_FoutJ))
+  (PERFORMANCE_TIME "merge J")
+  (if USE_INIT_EXT_EB
+    (begin
+      ;(blas_axpy_Field3D_MPI ("&" MPI_fieldE ) ("&" MPI_fieldE ) -1. ("&" MPI_fieldE_ext))
+      (blas_axpy_Field3D_MPI ("&" MPI_fieldB ) ("&" MPI_fieldB ) -1. ("&" MPI_fieldB_ext)))
+    )
+  (if (eq? USE_FILTER 3)
+    (begin
+      (blas_axpy_Field3D_MPI ("&" pthis->MPI_fieldE) ("&" pthis->MPI_fieldE) 1 ("&" pthis->MPI_fieldEtmp1))
+      (blas_axpy_Field3D_MPI ("&" pthis->MPI_fieldB) ("&" pthis->MPI_fieldB) 1 ("&" pthis->MPI_fieldBtmp1))
+      )
+    )
+
+  ;(block (decl-var-and-pvar Gaps_IO_DataFile gid) (init_parallel_file_for_mpi_fields pMPI_FoutJ pgid "tmpJ") (mpi_field_write_to_file pMPI_FoutJ pgid))
+  ;(exit 0)
+  (if (eq? USE_FILTER 1)
+    (blas_mulxy_Field3D_MPI pMPI_FoutJ pMPI_FoutJ ("&" pthis->MPI_fieldE_filter))
+    )
+  
+  (if merge_J
+  (blas_axpy_Field3D_MPI ("&" MPI_fieldE) ("&" MPI_fieldE) -1 pMPI_FoutJ))
+  (PERFORMANCE_TIME "E=E-J")
+  (return 0)
+  )
+

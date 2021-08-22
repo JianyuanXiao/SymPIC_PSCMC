@@ -1,0 +1,18 @@
+;paravec.scmc pscmc_config_runtime.ss
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(define-scmc-global gensync 
+  (lambda (h2dd2h)
+    `(defun-class-Field3D_Seq ,(concat 'sync_field_ h2dd2h) int ((int syncself))
+       (define i 0)
+       (if syncself
+	 (choose_the_runtime (,(concat 'pscmc_mem_sync_ h2dd2h) (vector-ref sync_layer_pscmc 13)))
+       (for i=0 (< i NUM_SYNC_LAYER) i++
+	 (if (neq? i 13)
+	   (choose_the_runtime (,(concat 'pscmc_mem_sync_ h2dd2h) (vector-ref sync_layer_pscmc i)))
+	   )
+	 ))
+       (return 0)
+       )))
+(eval-scmc-global (cons 'begin (map gensync '(h2d d2h))))
+

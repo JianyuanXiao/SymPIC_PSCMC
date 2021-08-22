@@ -1,0 +1,60 @@
+
+(input-scmc "../general_macros.scmc")
+;(include< "stdio.h")
+(input-include "local_header.h")
+(input-scmc "../simd_intrin_config.scmc")
+(input-scmc "../particle_macros.scmc")
+(eval-scmc-global
+  (begin
+    (load "../decscheme.ss")
+    (load "../multi-map.ss") 
+    (load "../Bproc_macros.scmc")
+    ;(load "../rel.ss") 
+    ;(defmacro floorx (x) (define tmpsym 'NEWSYM001_FLOORX) (define tmpsym-int 'NEWSYM001_FLOOR_INTX) `(block (define-double ,tmpsym ,x) (define-long ,tmpsym-int ,tmpsym) (if (< ,tmpsym ,tmpsym-int) (incf! ,tmpsym-int -1)) ,tmpsym-int))
+    (define (gen_1st_dual_kernels gen_rel_name rel_vars)
+      (begin-map
+	(lambda (name rel_file)
+	  (define use-tori (isinlst name '(implicit_2nd_tori_rel implicit_2nd_tori_nr)))
+	  ;(define use-midp (isinlst name '(implicit_2nd_tori_rel_midp implicit_2nd_tori_nr_midp implicit_2nd_slab_rel_midp implicit_2nd_slab_nr_midp)))
+	  ;(write (list name use-tori) current-error-port) (newline current-error-port)
+	  ;(define incfj      (if use-tori INCFJ0_TORI2ND INCFJ0_SLAB2ND))
+	  ;(define incfj_midp (if use-tori INCFJ0_TORI2ND INCFJ0_SLAB2ND))
+	  (set! name (concat 'cpp_ name))
+	  (define particle-len-cpp 8)
+	  `(begin
+	     ,(gen_push_kernel name rel_vars_mu
+		(kernel_gen_imifun rel_file (generate_incfJ0_torislab_2nd use-tori #f) #f use-tori 'floor #t particle-len-cpp #t) defJ01-cpp IDX_LCL_SPEC_LEN)
+	     ,(gen_push_kernel (multi-concat name '_midp_nopush_par) rel_vars_mu
+		(kernel_gen_imifun rel_file (generate_incfJ0_torislab_2nd use-tori #t) #f use-tori 'floor #f particle-len-cpp #t) defJ01-cpp IDX_LCL_SPEC_LEN)
+	     ,(gen_push_kernel (multi-concat name '_midp_nopushJ) rel_vars_mu
+		(kernel_gen_imifun rel_file (lambda x '()) #f use-tori 'floor #t particle-len-cpp #t) defJ01-cpp IDX_LCL_SPEC_LEN)
+	     
+	     )
+	  )
+	(list 
+	  (concat gen_rel_name 'tori_rel) 
+	  (concat gen_rel_name 'tori_nr)
+	  (concat gen_rel_name 'slab_rel) 
+	  (concat gen_rel_name 'slab_nr)
+	  )
+	`("../torirel2Mu.ss" "../torinr2Mu.ss" "../slabrel2Mu.ss" "../slabnr2Mu.ss")
+	;`("../torirel2.ss" "../torinr2.ss" "../slabrel2.ss" "../relng.ss")
+	)
+      )
+    ;(load "../rel.ss")
+    `(begin
+       ,(if (and USE_INTRIN (isinlst RUNTIME '(C OpenMP COI)))
+	  `(include< ,SIMD_HEADER)
+	  '()
+	  )
+       (defun floor2nd1 int ((double x))
+	 (define-int ax x)
+	 (if (> ax x) (incf! ax -1))
+	 ;(assert (<= ax x))
+	 (return ax)
+	 )
+       ;,(gen_1st_dual_kernels_small_grid 'geo_rel_1st rel_vars_smallgrid)
+       ,(gen_1st_dual_kernels 'implicit_2nd_ rel_vars)
+       )
+    )
+  )

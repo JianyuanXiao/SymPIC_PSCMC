@@ -1,0 +1,151 @@
+
+(input-include "local_header.h")
+(input-scmc "../general_macros.scmc")
+(input-scmc "../gen_discrete_operators.scmc")
+(eval-scmc-global 
+  (begin (load "../dmbihamtscheme.ss")
+    (load "../multi-map.ss")
+    (define (gen_dm_core_funs name corefun)
+    `(defkernel ,name ((double* dphi_dt_out) (double* phi_in) (double* A1) (double* Y1) (long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock) (int num_ele) (int num_ele_A1)  (double M) (double Q) (double DM_A) (double DX) (double DY) (double DZ) (double DT))
+       (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+       (define-long local_ymin (* __idy local_ynum))
+       (define-long local_ymax (* (+ 1 __idy) local_ynum))
+       (if (>= local_ymax numvec) (set! local_ymax numvec))
+       (define-long blk_all_len_nonele (* xblock yblock zblock))
+       (define-int num_ele_phi num_ele)
+       (define-int num_ele_A num_ele_A1)
+       (define dm_a DM_A)
+       (for-from-to i local_ymin local_ymax 
+	 (define allmax (* XLEN YLEN ZLEN))
+	 (define-long g 0)
+	 (for (set! g 0) (< g allmax) (incf! g __xlen)
+	   (define-long xyzx (remainder g XLEN))
+	   (define-long xyzy (remainder (/ g XLEN) YLEN))
+	   (define-long xyzz (/ g (* XLEN YLEN)))
+	   (define-long blk_offset_phi (* blk_all_len_nonele i num_ele_phi))
+	   (define-long blk_offset_A (* blk_all_len_nonele i num_ele_A))
+	   ,(corefun)
+	   )
+	 )
+       ))
+    (define (gen_012_corefun name writeback-fun . use-fm-field)
+      (if (null? use-fm-field) (set! use-fm-field #f) (set! use-fm-field (car use-fm-field)))
+      (gen_dm_core_funs name
+	(lambda ()
+	  `(begin
+	     (begin . ;here i j k are z y x
+	       ,(multi-map 
+		  (lambda ijk
+		    (multi-define i j k ijk)
+		    (define the-lst (map (lambda (x) (number->string x)) ijk))
+		    (define (gen_cursym ch t xyz) 
+		      (apply multi-concat (lcons ch t (append the-lst xyz))))
+		    `(begin
+		       ,(begin-map
+			  (lambda (xyz) 
+			    (define theA1 (gen_cursym 'vA "" `(,(number->string xyz))))
+			    (define theY1 (gen_cursym 'vY "" `(,(number->string xyz))))
+			    `(begin 
+			       (define-double ,theA1 (vector-ref (+ A1 blk_offset_A) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) (+ ,xyz -1 0) num_ele_A)))
+			       (define-double ,theY1 (vector-ref (+ Y1 blk_offset_A) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) (+ ,xyz -1 0) num_ele_A)))
+			       ;(define-double ,(concat 'cosq theA1) (cos (* Q ,theA1)))
+			       ;(define-double ,(concat 'sinq theA1) (sin (* Q ,theA1)))
+			       ;(define-double ,(concat 'cosq theA2) (cos (* Q ,theA2)))
+			       ;(define-double ,(concat 'sinq theA2) (sin (* Q ,theA2)))
+			       )
+			    ) '(1 2 3)
+			  )
+		       ,(begin-map
+			  (lambda (a1234)
+			    (define ns1234 (number->string a1234))
+			    `(begin 
+			       (define-double ,(gen_cursym 'PHI_R_ ns1234  `()) (vector-ref (+ phi_in blk_offset_phi) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) (+ (* ,a1234 2) -2) num_ele_phi)))
+			       (define-double ,(gen_cursym 'PHI_I_ ns1234 `()) (vector-ref (+ phi_in blk_offset_phi) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) (+ (* ,a1234 2) -1) num_ele_phi)))
+			       ,(if use-fm-field
+				  `(begin
+				     (define-double ,(gen_cursym 'PHIF_R_ ns1234  `()) (vector-ref (+ dphi_dt_out blk_offset_phi) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) (+ (* ,a1234 2) -2) num_ele_phi)))
+				     (define-double ,(gen_cursym 'PHIF_I_ ns1234 `()) (vector-ref (+ dphi_dt_out blk_offset_phi) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) (+ (* ,a1234 2) -1) num_ele_phi)))
+				     )
+				  '()
+				  )
+			       )) '(1 2 3 4))
+		       )
+		    ) 
+		  '(0 1 2) '(0 1 2) '(0 1 2)
+		  )
+	       )
+	     ,(writeback-fun)
+	     )
+	  )
+	)
+      )
+      
+    `(begin
+       ,(gen_012_corefun 'dm_bihamt_dual_psi_eqn_J
+	  (lambda ()
+	    `(begin
+	       (set! (vector-ref (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 0 num_ele_A)) ,(eval `(fl23 0)))
+	       (set! (vector-ref (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 1 num_ele_A)) ,(eval `(fl24 0)))
+	       (set! (vector-ref (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 2 num_ele_A)) ,(eval `(fl25 0)))
+	       )
+	    ) #t
+	  )
+       ,(gen_012_corefun 'dm_bihamt_eqn_dydt
+	  (lambda ()
+	    `(begin
+	       (incf! (vector-ref (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 0 num_ele_A)) ,(eval `(fl19 0)))
+	       (incf! (vector-ref (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 1 num_ele_A)) ,(eval `(fl20 0)))
+	       (incf! (vector-ref (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 2 num_ele_A)) ,(eval `(fl21 0)))
+	       )
+	    )
+	  )
+       ,(gen_012_corefun 'dm_cayley_eqn_J
+	  (lambda ()
+	    `(begin
+	       (vector-set! (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 0 num_ele_A) ,(eval `(fl8 0)))
+	       (vector-set! (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 1 num_ele_A) ,(eval `(fl9 0)))
+	       (vector-set! (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 2 num_ele_A) ,(eval `(fl10 0)))
+	       )
+	    )
+	  )
+       ,(gen_012_corefun 'dm_calc_hamt 
+	  (lambda ()
+	    `(begin 
+	       (vector-set! (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 0 num_ele_A) ,(eval `(fl22 0))))
+	       ;(vector-set! (+ dphi_dt_out blk_offset_phi) (GET_IDXYZLO2 xyzx xyzy xyzz 1 num_ele_phi) ,(eval `(fl22 0)))
+	    )
+	  )
+       ,(gen_012_corefun 'dm_exact_eqn_m
+	  (lambda ()
+	    `(begin . 
+	       ,(let loop ((n 11))
+		  (cond
+		    ((eq? n 19) '())
+		    (else
+		      (cons `(vector-set! (+ dphi_dt_out blk_offset_phi) (GET_IDXYZLO2 xyzx xyzy xyzz (- ,n 11) num_ele_phi) ,(eval (list (concat 'fl (number->string n)) 0))) (loop (+ n 1)))
+		      )
+		    )
+		  )
+	       )
+	    )
+	  )
+       ,(gen_012_corefun 'dm_cayley_eqn_core 
+	  (lambda ()
+	    `(begin .
+	       ,(let loop ((n 0))
+		  (cond
+		    ((eq? n 8) '())
+		    (else
+		      (cons `(vector-set! (+ dphi_dt_out blk_offset_phi) (GET_IDXYZLO2 xyzx xyzy xyzz ,n num_ele_phi) ,(eval (list (concat 'fl (number->string n)) 0))) (loop (+ n 1)))
+		      )
+		    )
+		  )) 
+	    )
+	  )
+       ,(gen_012_corefun 'dm_calc_hamt_dual 
+	  (lambda ()
+	    `(begin 
+	       (vector-set! (+ Y1 blk_offset_A) (GET_IDXYZLO2 xyzx xyzy xyzz 0 num_ele_A) ,(eval `(fl26 0))))
+	    ) #t)
+       ))) 
+

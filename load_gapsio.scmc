@@ -1,0 +1,69 @@
+(define-scmc-global GAPSIO_CACHE_LEN 64)
+(define-scmc-global set_global_vars '())
+(define-scmc-global gen_loadgapsio 
+  (lambda (name ret args)
+    (define constant_config_fun_var (multi-concat 'GET_INIT_ name '_inner_procedure))
+    (define constant_config_fun_name (multi-concat name '_global_procedure))
+    (define filename (multi-concat "" name "_file"))
+    (define constant_config_global_var (multi-concat 'p name '_gid_global_var))
+    (define constant_config_cache_var (multi-concat name '_gid_cache_var))
+    (define constant_config_cache_pos (multi-concat name '_gid_cache_pos))
+    (define arg_names (map cadr args))
+    (define (get_cur_pos)
+      (let loop ((arg_names (reverse arg_names)) (n 0))
+	(cond
+	  ((null? arg_names) 0)
+	  (else
+	    `(+ (type-convert long ,(car arg_names)) (* (vector-ref pdimarray ,n) ,(loop (cdr arg_names) (+ n 1))))
+	    )
+	  )
+	)
+      )
+    (set! set_global_vars
+      (cons
+	`(block
+	   (define-char* nm ,filename)
+	   (define-FILE* fp (fopen nm "r"))
+	   (if fp
+	     (begin
+	       (LOG_RECORD_INFO "found %s for input\n" nm)
+	       (set! ,constant_config_global_var (TYPE_MALLOC Gaps_IO_DataFile 1))
+	       (GAPS_IO_InitIFile ,constant_config_global_var nm)
+	       (assert (== (structp-ref ,constant_config_global_var version) 0))
+	       (assert (== (structp-ref ,constant_config_global_var dim) ,(length arg_names)))
+	       (set! ,constant_config_fun_var ,constant_config_fun_name)
+	       )
+	     )
+	   )
+	set_global_vars)
+      )
+    `(begin 
+       (define-Gaps_IO_DataFile* ,constant_config_global_var NULL)
+       (dec-array ,ret ,constant_config_cache_var ,GAPSIO_CACHE_LEN)
+       (define-long ,constant_config_cache_pos -1)
+       (defun ,constant_config_fun_name ,ret ,args
+	 (if ,constant_config_global_var
+	   (begin
+	     (define-long* pdimarray (structp-ref ,constant_config_global_var pdimarray))
+	     (define-long current_cache_pos ,(get_cur_pos))
+	     (define-long offset_pos (- current_cache_pos ,constant_config_cache_pos))
+	     (cond
+	       ((or (eq? ,constant_config_cache_pos -1) (< offset_pos 0) (>= offset_pos ,GAPSIO_CACHE_LEN))
+		 (GAPS_IO_DataSeek ,constant_config_global_var 0 current_cache_pos)
+		 (GAPS_IO_FRead ,constant_config_global_var ,constant_config_cache_var ,GAPSIO_CACHE_LEN)
+		 (set! ,constant_config_cache_pos current_cache_pos)
+		 (return (vector-ref ,constant_config_cache_var 0))
+		 )
+	       (else
+		 (return (vector-ref ,constant_config_cache_var offset_pos))
+		 )
+	       )
+	     )
+	   (return 0)
+	   )
+	 ))
+    ))
+(define-scmc-global init-global-gapsio-fun-vars 
+  (lambda ()
+    (cons 'begin set_global_vars))
+  )

@@ -1,0 +1,96 @@
+(define (gen_dm_core_funs name corefun)
+  `(defkernel ,name ((double* dphi_dt_out) (double* phi_in) (double* A1) (double* Y1) (long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock) (int num_ele) (int num_ele_A1)  (double M) (double Q) (double DM_A) (double DX) (double DY) (double DZ) (double DT))
+     (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+     (define-long local_ymin (* __idy local_ynum))
+     (define-long local_ymax (* (+ 1 __idy) local_ynum))
+     (if (>= local_ymax numvec) (set! local_ymax numvec))
+     (define-long blk_all_len_nonele (* xblock yblock zblock))
+     (define-int num_ele_phi num_ele)
+     (define-int num_ele_A num_ele_A1)
+     (define dm_a DM_A)
+     (for-from-to i local_ymin local_ymax 
+       (define allmax (* XLEN YLEN ZLEN))
+       (define-long g 0)
+       (for (set! g 0) (< g allmax) (incf! g __xlen)
+	 (define-long xyzx (remainder g XLEN))
+	 (define-long xyzy (remainder (/ g XLEN) YLEN))
+	 (define-long xyzz (/ g (* XLEN YLEN)))
+	 (define-long blk_offset_phi (* blk_all_len_nonele i num_ele_phi))
+	 (define-long blk_offset_A (* blk_all_len_nonele i num_ele_A))
+	 ,(corefun)
+	 )
+       )
+     )
+  )
+(define (gen_012_corefun name writeback-fun num-dm-fields)
+  ;(if (null? use-fm-field) (set! use-fm-field #f) (set! use-fm-field (car use-fm-field)))
+  (gen_dm_core_funs name
+    (lambda ()
+      `(begin
+	 (begin . ;here i j k are z y x
+	   ,(multi-map 
+	      (lambda ijk
+		(multi-define i j k ijk)
+		(define the-lst (map (lambda (x) (number->string x)) ijk))
+		(define (gen_cursym ch t xyz) 
+		  (apply multi-concat (lcons ch t (append the-lst xyz))))
+		`(begin
+		   ,(begin-map
+		      (lambda (xyz) 
+			(define theA1 (gen_cursym 'vA "" `(,(number->string xyz))))
+			(define theY1 (gen_cursym 'vY "" `(,(number->string xyz))))
+			`(begin 
+			   (define-double ,theA1 (vector-ref (+ A1 blk_offset_A) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,(+ xyz -1 0) num_ele_A)))
+			   (define-double ,theY1 (vector-ref (+ Y1 blk_offset_A) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,(+ xyz -1 0) num_ele_A)))
+			   ;(define-double ,(concat 'cosq theA1) (cos (* Q ,theA1)))
+			   ;(define-double ,(concat 'sinq theA1) (sin (* Q ,theA1)))
+			   ;(define-double ,(concat 'cosq theA2) (cos (* Q ,theA2)))
+			   ;(define-double ,(concat 'sinq theA2) (sin (* Q ,theA2)))
+			   )
+			) '(1 2 3)
+		      )
+		   ,(begin-map
+		      (lambda (a1234)
+			(define ns1234 (number->string a1234))
+			`(begin 
+			   (define-double ,(gen_cursym 'PHI_R_ ns1234  `()) (vector-ref (+ phi_in blk_offset_phi) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,(+ (* a1234 2) -2) num_ele_phi)))
+			   (define-double ,(gen_cursym 'PHI_I_ ns1234 `()) (vector-ref (+ phi_in blk_offset_phi) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,(+ (* a1234 2) -1) num_ele_phi)))
+			   ,(if (eq? num-dm-fields 8)
+			      `(begin
+				 (define-double ,(gen_cursym 'PHIF_R_ ns1234  `()) (vector-ref (+ phi_in blk_offset_phi) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,(+ (* a1234 2) -2 8) num_ele_phi)))
+				 (define-double ,(gen_cursym 'PHIF_I_ ns1234 `()) (vector-ref (+ phi_in blk_offset_phi) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,(+ (* a1234 2) -1 8) num_ele_phi)))
+				 )
+			      '()
+			      )
+			   )) '(1 2 3 4))
+		   )
+		) 
+	      '(0 1 2) '(0 1 2) '(0 1 2)
+	      )
+	   )
+	 ,(writeback-fun)
+	 )
+      )
+    )
+  )
+(define (gen_012_corefun_simplified kfname_vecs_blk-offsets_num-eles_num-ele-offsets_fl-offsets-num-sets num-dm-fields)
+  (begin-map
+    (lambda (x)
+      (multi-define kfname vecname blk-offset num-ele num-ele-offset fl-offset num-set x)
+      (gen_012_corefun kfname 
+	(lambda ()
+	  `(begin .
+	     ,(let loop ((n 0))
+		(cond 
+		  ((eq? n num-set) '())
+		  (else
+		    (cons 
+		      `(set! (vector-ref (+ ,vecname ,blk-offset) (GET_IDXYZLO2 xyzx xyzy xyzz (+ ,num-ele-offset ,n) ,num-ele)) ,(eval (list (concat 'fl (number->string (+ fl-offset n))) 0)))
+		      (loop (+ n 1)))
+		    )
+		  )
+		))
+	  ) num-dm-fields))
+    kfname_vecs_blk-offsets_num-eles_num-ele-offsets_fl-offsets-num-sets
+    )
+  )

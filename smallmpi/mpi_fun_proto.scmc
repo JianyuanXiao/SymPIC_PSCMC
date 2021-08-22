@@ -1,0 +1,21 @@
+
+(define-scmc-global PS_MPI_PREFIX 'PS_)
+(define-scmc-global MPI_GLOBAL_TYPES '(MPI_Comm MPI_Datatype MPI_Request MPI_Status))
+(define-scmc-global MPI_FUN_PROTO 
+  '(
+     (int MPI_Abort ((MPI_Comm comm) (int errorcode)))
+     (int MPI_Barrier ((MPI_Comm comm)))
+     (int MPI_Bcast ((void* buffer) (int count) (MPI_Datatype datatype) (int root) (MPI_Comm comm)))
+     (int MPI_Comm_rank ((MPI_Comm comm) (int* rank)))
+     (int MPI_Comm_size ((MPI_Comm comm) (int* size)))
+     (int MPI_Finalize ())
+     (int MPI_Gather ((void* sendbuf) (int sendcount) (MPI_Datatype sendtype) (void* recvbuf) (int recvcount) (MPI_Datatype recvtype) (int root) (MPI_Comm comm)))
+     (int MPI_Get_processor_name ((char* name) (int* resultlen)))
+     (int MPI_Init ((int* argc) (char*** argv)))
+     (int MPI_Send ((void* buf) (int count) (MPI_Datatype datatype) (int dest) (int tag) (MPI_Comm comm)))
+     (int MPI_Isend ((void* buf) (int count) (MPI_Datatype datatype) (int dest) (int tag) (MPI_Comm comm) (MPI_Request* request)))
+     (int MPI_Recv ((void* buf) (int count) (MPI_Datatype datatype) (int source) (int tag) (MPI_Comm comm) (MPI_Status* status)))
+     (int MPI_Reduce ((void* buf) (void* recvbuf) (int count) (MPI_Datatype datatype) (MPI_Op op) (int root) (MPI_Comm comm)))
+     (int MPI_Sendrecv ((void* sendbuf) (int sendcount) (MPI_Datatype sendtype) (int dest) (int sendtag) (void* recvbuf) (int recvcount) (MPI_Datatype recvtype) (int source) (int recvtag) (MPI_Comm comm) (MPI_Status* status)))
+     (int MPI_Wait ((MPI_Request* request) (MPI_Status* status)))
+     ))

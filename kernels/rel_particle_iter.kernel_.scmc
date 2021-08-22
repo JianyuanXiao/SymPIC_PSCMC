@@ -1,0 +1,28 @@
+
+(input-scmc "../general_macros.scmc")
+;(include< "stdio.h")
+(input-include "local_header.h")
+(input-scmc "../simd_intrin_config.scmc")
+(input-scmc "../particle_macros.scmc")
+(eval-scmc-global
+  (begin
+    (load "../decscheme.ss")
+    (load "../multi-map.ss") 
+    (load "../Bproc_macros.scmc")
+    (define rel_vars '((double* inoutput) (int* xyzw) (double* cu_cache) (int* cu_xyzw) (int* xoffset) (int* yoffset) (int* zoffset) (double* fieldE) (double* fieldB) (double* fieldB1) (double* FoutJ) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double DELTA_X) (double DELTA_Y) (double DELTA_Z) (double Mass0) (double Charge0 ) (double Deltat) (double Tori_X0) (double Solve_Err)))
+    ;(load "../relng.ss")
+    `(begin
+       ,(if (and USE_INTRIN (isinlst RUNTIME '(C OpenMP COI)))
+	  `(include< ,SIMD_HEADER)
+	  '()
+	  )
+       (defun floory int ((double x))
+	 (define-int ax x)
+	 (if (> ax x) (incf! ax -1))
+	 ;(assert (<= ax x))
+	 (return ax)
+	 )
+       ,(gen_push_kernel 'relng_1st rel_vars (kernel_gen_imifun "../relng.ss" INCFJ0_RELNG #f #f 'floor) defJ01 IDX_LCL_SPEC_LEN)
+       )
+    )
+  )

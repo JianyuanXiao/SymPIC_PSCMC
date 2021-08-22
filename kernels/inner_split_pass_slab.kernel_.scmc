@@ -1,0 +1,5 @@
+
+(define-scmc-global lhs_eqs_ss_file_name "../slab_norel.ss")
+(define-scmc-global use-midp #f)
+(define-scmc-global geo_ 'slab_)
+(input-scmc "../inner_split_pass_kernel_macro.scmc")

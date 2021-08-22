@@ -1,0 +1,36 @@
+;pic_helper.scmc general_macros.scmc paravec.scmc pscmc_config_runtime.ss
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include< "math.h")
+(include- "blas_shell.h")
+(include< "cgapsio.h")
+(include- "mpi_fieldio.h")
+(include- "cfgcst.h")
+(include- "call_curl_kernel.h")
+(include- "run_particle.h")
+(include- "sync_fields.h")
+(include- "run_particle.h")
+
+(dec-fun wclk_now double ())
+
+(eval-scmc-global 
+  (begin
+    (load "pic_helper.scmc")
+    ;(write runtimes current-error-port) (newline current-error-port)
+    `(begin
+       ,(begin-map call-fun-geo-rel (map car runtimes))
+       ,(call-fun-seq-mpi-geo-rel)
+       ,(begin-map call-fun-rel (map car runtimes))
+       ,(call-fun-seq-mpi-rel)
+       ,(begin-map call-fun-krook (map car runtimes))
+       ,(call-fun-seq-mpi-krook)
+       ,(begin-map call-fun-boris (map car runtimes))
+       ,(call-fun-seq-mpi-boris)
+       )
+    )
+  )

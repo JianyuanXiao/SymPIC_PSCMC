@@ -1,0 +1,17 @@
+
+(input-include "local_header.h")
+(input-scmc "../general_macros.scmc")
+(input-scmc "../gen_discrete_operators.scmc")
+(eval-scmc-global
+  (begin (load "../multi-map.ss")
+    (begin-map
+      (lambda (name file scalarg)
+	(gengeocurl_core_from_ss_file name file scalarg '() 0)
+	)
+      '(RECT_YEE_CURL_L)
+      '("../geoyee_rect.ss")
+      '(((double DELTA_X) (double DELTA_Y) (double DELTA_Z)))
+      )
+    )
+  )
+

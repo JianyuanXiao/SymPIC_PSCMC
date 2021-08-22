@@ -1,0 +1,8 @@
+;paravec.scmc
+(input-scmc "paravec.scmc")
+(defun Fcar Field3D_Seq* ((Field3D_Seq_PAIR* p))
+  (return p->car)
+  )
+(defun Fcdr Field3D_Seq_PAIR* ((Field3D_Seq_PAIR* p))
+  (return p->cdr)
+  )

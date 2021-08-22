@@ -1,0 +1,18 @@
+
+(include< "mpi.h")
+(input-scmc "mpi_fun_proto.scmc")
+(eval-scmc-global
+  (append '(begin)
+    (map 
+      (lambda (mpitype)
+	`(pure-text ,(multi-concat "\n#define " PS_MPI_PREFIX mpitype " " mpitype "\n"))
+	)
+      '(MPI_CHAR MPI_INT MPI_DOUBLE MPI_FLOAT MPI_LONG MPI_LONG_LONG MPI_COMM_WORLD)
+      )
+    (map
+      (lambda (type)
+	`(pure-text ,(multi-concat "\ntypedef " type " " PS_MPI_PREFIX type ";\n"))
+	)
+      MPI_GLOBAL_TYPES
+      )))
+

@@ -1,0 +1,72 @@
+include RUNTIME_SPEC.mk
+LCNAME    := $(shell echo $(RUNTIME) | tr '[A-Z]' '[a-z]')
+
+SCMC2C    := scmc_compile_passes
+PSCMC2C   := scmc_parallel_compile_passes
+
+#CC        := gcc
+CFLAGS    := $(H_CFLAGS)
+AR        := ar
+ARFLAG    := rcs
+
+SCMC_SOURCES    = $(notdir $(patsubst %_.scmc,%.scmc,$(wildcard ../kernels/*.kernel_.scmc)))
+KERNEL_SOURCES  = $(patsubst %.kernel.scmc,%.kernel.$(D_FILEEXT),$(SCMC_SOURCES))
+RUNTIME_SOURCES = $(patsubst %.kernel.scmc,%.kernel_runtime.$(FILEEXT),$(SCMC_SOURCES))
+ifeq ($(RUNTIME),$(filter $(RUNTIME), CUDA OpenCL HIP SYCL COI))
+	KERNEL_OBJS = 
+else
+	KERNEL_OBJS = $(patsubst %.$(D_FILEEXT),%.o,$(KERNEL_SOURCES))
+endif
+RUNTIME_OBJS    = $(patsubst %.$(FILEEXT),%.o,$(RUNTIME_SOURCES))
+OBJS            = $(KERNEL_OBJS) $(RUNTIME_OBJS) $(PREFIX)pscmc.o
+SOURCES_H	= $(RUNTIME_OBJS:.o=.h) $(PREFIX)pscmc.h
+
+all: $(SCMC_SOURCES) $(patsubst %.scmc,%.$(D_FILEEXT),$(SCMC_SOURCES)) $(patsubst %.scmc,%_runtime.$(FILEEXT),$(SCMC_SOURCES)) $(patsubst %.scmc,%_runtime.$(FILEEXT).def.ss,$(SCMC_SOURCES)) ../$(PREFIX)yeefdtd.h ../$(PREFIX)yeefdtd.a
+
+../$(PREFIX)yeefdtd.a: $(OBJS)
+	$(AR) $(ARFLAG) ../$(PREFIX)yeefdtd.a $^
+../$(PREFIX)yeefdtd.h: $(SOURCES_H)
+	cat $(SOURCES_H) > ../$(PREFIX)yeefdtd.h
+
+$(PREFIX)pscmc.h: $(PREFIX)pscmc.c.def.ss
+	../gen_scmc_defs.sh $<
+$(PREFIX)pscmc.c.def.ss: $(PREFIX)pscmc.c
+	touch $(PREFIX)pscmc.c.def.ss
+%.kernel_runtime.h: %.kernel_runtime.$(FILEEXT).def.ss
+	../gen_scmc_defs.sh $<
+
+%.kernel.o: %.kernel.$(D_FILEEXT)
+	$(D_CC) $(D_CFLAGS) $<
+
+%.kernel_runtime.o: %.kernel_runtime.$(FILEEXT)  $(PREFIX)pscmc_inc.h local_header.h
+	$(H_CC) $(H_CFLAGS) $<
+
+%.kernel_runtime.$(FILEEXT).def.ss: %.kernel.$(D_FILEEXT)
+	touch $@
+
+%.kernel.scmc: ../kernels/%.kernel_.scmc
+	cp $< $(notdir $(patsubst %_.scmc,%.scmc,$<))
+%.kernel.$(D_FILEEXT): %.kernel.scmc
+	$(PSCMC2C) $< $(RUNTIME) $(PREFIX)
+%.kernel_runtime.$(FILEEXT): %.kernel.$(D_FILEEXT)
+	touch $@
+#%.kernel_runtime.h: %.kernel.$(FILEEXT)
+#	ls $<
+
+
+
+$(PREFIX)pscmc.c: $(PREFIX)pscmc_$(LCNAME).scmc $(PREFIX)pscmc_inc.scmc
+	$(SCMC2C) $< $(RUNTIME) host $@ $(PREFIX)
+$(PREFIX).c.def.ss: $(PREFIX)pscmc.c
+	echo $<
+
+$(PREFIX)pscmc_inc.h: $(PREFIX)pscmc_inc.scmc
+	$(SCMC2C) $< $(RUNTIME) host $@ $(PREFIX)
+
+.PHONY: all clean cleanall
+
+clean:
+	-rm -f *.o
+
+cleanall: clean
+	-rm -f *.kernel.c *.kernel_runtime.$(FILEEXT) *.kernel_inc.h *.kernel.$(FILEEXT).def.ss *pscmc*.[ch]

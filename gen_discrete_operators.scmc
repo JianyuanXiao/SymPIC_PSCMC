@@ -1,0 +1,140 @@
+(defmacro xyzmax_ifn1x2 (x)
+  `(if (== ,x 1) ,x (* ,x 2))
+  )
+
+(define-scmc-global gen-dis-dec
+  (lambda (level)
+    (lambda (inF x0 y0 z0 xyz offset)
+      (define (getvecid vname xid yid zid l)
+	`(vector-ref ,vname (get-offset-id4 ,x0 ,y0 ,z0 ,l ,xid ,yid ,zid num_ele xb yb zb))
+	)
+      (define (get_rcs_id dir offset l)
+	(define alloff (vector 0 0 0))
+	(vector-set! alloff dir offset)
+	(set! alloff (vector->list alloff))
+	(apply getvecid (append `(,inF) alloff `(,l)))
+	)
+      (define name_vec (vector 0 1 2 0 1 2))
+      ;(write 'OKHERE current-error-port) 
+      ;(write offset current-error-port)
+      ;(write-string "\n" current-error-port)
+      (define self0 (vector-ref name_vec xyz))
+      (define self1 (vector-ref name_vec (+ xyz 1)))
+      (define self2 (vector-ref name_vec (+ xyz 2)))
+      (define offset_ref (if (> offset 0) (- offset 1) (+ offset 1)))
+      (case level
+	(0
+	  `(- ,(get_rcs_id self0 offset 0) ,(get_rcs_id self0 (- offset_ref) 0))
+	  )
+	(1
+	  `(- 
+	     (- ,(get_rcs_id self1 offset self2) ,(get_rcs_id self1 (- offset_ref) self2)) 
+	     (- ,(get_rcs_id self2 offset self1) ,(get_rcs_id self2 (- offset_ref) self1)) 
+	     ))
+	(2
+	  (list '+ 
+	    `(- ,(get_rcs_id self0 offset 0) ,(get_rcs_id self0 (- offset_ref) 0))
+	    `(- ,(get_rcs_id self1 offset 1) ,(get_rcs_id self1 (- offset_ref) 1))
+	    `(- ,(get_rcs_id self2 offset 2) ,(get_rcs_id self2 (- offset_ref) 2))
+	    )
+	  )
+	;(100 `(+ (* ,(/ 13 12) ,(get_rcs_id self0 0 0)) (* ,(/ 1 24) ,(get_rcs_id self0 1 0)) (* ,(/ 1 24) ,(get_rcs_id self0 -1 0))))
+	)))
+  )
+(define-scmc-global gen-4th-dis-dec 
+  (lambda (level)
+    (lambda (inF x0 y0 z0 xyz offset)
+    `(- (* 1.125 ,((gen-dis-dec level) inF x0 y0 z0 xyz offset)) (/ ,((gen-dis-dec level) inF x0 y0 z0 xyz (* 2 offset)) 24))
+      )
+    )
+  )
+(define-scmc-global gen-dis-curl
+  (gen-dis-dec 1)
+  )
+(define-scmc-global gen-4th-dis-curl
+  (lambda (inF x0 y0 z0 xyz offset)
+    `(- (* 1.125 ,(gen-dis-curl inF x0 y0 z0 xyz offset)) (/ ,(gen-dis-curl inF x0 y0 z0 xyz (* 2 offset)) 24))
+    )
+  )
+(define-scmc-global gengeocurl_core
+  (lambda (name corefun extra_scal_args extra_vector_args . use-small-block-copy)
+    (set! use-small-block-copy (if (null? use-small-block-copy) #f (car use-small-block-copy)))
+    (define blk_opt_len 2048)
+    `(defkernel ,name ,(append `((double* inoutE1) (double* inB0) (int* xoffset) (int* yoffset) (int* zoffset)) extra_vector_args `((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock) (int num_ele)) extra_scal_args)
+       (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+       (define-long local_ymin (* __idy local_ynum))
+       (define-long local_ymax (* (+ 1 __idy) local_ynum))
+       (if (>= local_ymax numvec) (set! local_ymax numvec))
+       (define-long blk_all_len_nonele (* xblock yblock zblock))
+       (for-from-to i local_ymin local_ymax 
+	 (define gxoffset (vector-ref xoffset i))
+	 (define gyoffset (vector-ref yoffset i))
+	 (define gzoffset (vector-ref zoffset i))
+	 (define allmax (* XLEN YLEN ZLEN))
+	 (define-long blk_offset (* blk_all_len_nonele i num_ele))
+	 (if (and ,(if use-small-block-copy 1 0) (< (* blk_all_len_nonele num_ele) ,blk_opt_len))
+	    (begin
+	       (dec-array double vread_tmp ,blk_opt_len) ; this reads blk_all_len_nonele
+	       (dec-array double vwrt_tmp ,blk_opt_len)  ;this writes blk_all_len_nonele
+	       (INIT_ASYNC_IO_LOCK rdwt_lock)
+	       (GET_CONT_MEMORY vread_tmp (+ inB0 blk_offset) (* blk_all_len_nonele num_ele) rdwt_lock)
+	       (GET_CONT_MEMORY vwrt_tmp (+ inoutE1 blk_offset) (* blk_all_len_nonele num_ele) rdwt_lock)
+	       (WAIT_SPARSE_MEMORY rdwt_lock)
+	       (fffor-xyz-from-zero-to XLEN YLEN ZLEN
+		 ,(corefun #t))
+	       (PUT_CONT_MEMORY (+ inoutE1 blk_offset) vwrt_tmp (* blk_all_len_nonele num_ele))
+	       ;(fffor-from-zero-to 1 YLEN ZLEN (define-long offset_local (GET_IDXYZLO2 0 xyzy xyzz 0 num_ele)) (PUT_CONT_MEMORY (+ inoutE1 blk_offset offset_local) (vwrt_tmp offset_local) (* XLEN num_ele)))
+	       )
+	    (begin
+	       (define-long lg 0)
+	       (for (set! lg 0) (< (+ lg __idx) allmax) (incf! lg __xlen)
+		 (define-long g (+ lg __idx))
+		 (define-long xyzx (remainder g XLEN))
+		 (define-long xyzy (remainder (/ g XLEN) YLEN))
+		 (define-long xyzz (/ g (* XLEN YLEN)))
+		 ,(corefun)
+		 )))
+	 )
+       )
+    ))
+(define-scmc-global gengeocurl_core_from_ss_file
+  (lambda (name ss_file extra_scal_args extra_vector_args line_offset)
+    (set! extra_scal_args (append '((double DT)) extra_scal_args))
+    (gengeocurl_core name
+      (lambda use-small-block-copy
+	(set! use-small-block-copy (if (null? use-small-block-copy) #f (car use-small-block-copy)))
+	(define wrt-E1 (if use-small-block-copy 'vwrt_tmp `(+ inoutE1 blk_offset)))
+	(load ss_file)
+	`(begin
+	   (begin . 
+	     ,(multi-map
+		(lambda ijk
+		  (multi-define i j k ijk)
+		  (define the-lst (map (lambda (x) (number->string x)) ijk))
+		  (define (gen_cursym ch t xyz) 
+		    (apply multi-concat (lcons ch t (append the-lst xyz))))
+		  `(begin 
+		     ,(begin-map
+			(lambda (xyz)
+			  (define theB0 (apply multi-concat (append (lcons 'vB (number->string xyz) the-lst) '("1"))))
+			  `(begin 
+			     (define-double ,theB0 (vector-ref ,(if use-small-block-copy 'vread_tmp `(+ inB0 blk_offset)) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) (+ ,xyz 0) num_ele)))
+			     )
+			  )
+			'(0 1 2)
+			)
+		     )
+		  )
+		'(0 1 2) '(0 1 2) '(0 1 2)
+		)
+	     )
+	   (define-double xo0 (+ gxoffset xyzx -1))
+	   (incf! (vector-ref ,wrt-E1 (GET_IDXYZLO2 xyzx xyzy xyzz 0 num_ele)) (* DT ,(eval (list (concat 'fl (number->string (+ 0 line_offset))) 0))))
+	   (incf! (vector-ref ,wrt-E1 (GET_IDXYZLO2 xyzx xyzy xyzz 1 num_ele)) (* DT ,(eval (list (concat 'fl (number->string (+ 1 line_offset))) 0))))
+	   (incf! (vector-ref ,wrt-E1 (GET_IDXYZLO2 xyzx xyzy xyzz 2 num_ele)) (* DT ,(eval (list (concat 'fl (number->string (+ 2 line_offset))) 0))))
+	   )
+	)
+      extra_scal_args extra_vector_args (if (isinlst RUNTIME '(SWMC)) #t #f))
+    )
+  )
+(define-scmc-global yee-header-procs `((double* outEB) (double* inEB) (long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock) (int num_ele) (double DT)))

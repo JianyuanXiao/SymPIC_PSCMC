@@ -1,0 +1,788 @@
+(define-scmc-global VOLATILE-FREE #f)
+(define-scmc-global USE-ALL-IN-ONE-SYNC-LAYER #t)
+(define-scmc-global LOG_LEVEL_PRE 3)
+(define-scmc-global USE_VEC #t)
+;(define-scmc-global IMP_IDX_OPT_MAX 8)
+(defmacro fffor_xyz_from_to (xmi ymi zmi xma yma zma . body)
+  `(fffor_from_to xyzx xyzy xyzz ,xmi ,ymi ,zmi ,xma ,yma ,zma . ,body)
+  )
+(defmacro fffor-xyz-from-zero-to (xma yma zma . body)
+  `(fffor_xyz_from_to 0 0 0 ,xma ,yma ,zma . ,body)
+  )
+(defmacro fffor_xyz_from_zero_to (xma yma zma . body)
+  `(fffor_xyz_from_to 0 0 0 ,xma ,yma ,zma . ,body)
+  )
+(defmacro GET_IDX_PERIOD (x xlen) `(remainder (+ ,x ,xlen) ,xlen))
+(defmacro GET_IDXYZL (x y z l numele xlen ylen zlen)
+  `(+ ,l (* ,numele (+ ,x (* ,xlen (+ ,y (* ,ylen ,z))))))
+  )
+(defmacro GET_IDXYZLO2 (x y z l num_ele)
+  `(GET_IDXYZL (+ ,x ovlp) (+ ,y ovlp) (+ ,z ovlp) ,l ,num_ele xblock yblock zblock)
+  )
+(defmacro GET_IDXYZLO (x y z l)
+  `(GET_IDXYZL (+ ,x ovlp) (+ ,y ovlp) (+ ,z ovlp) ,l num_ele xblock yblock zblock)
+  )
+(defmacro GET_IDXYZ_PERIOD (x y z xlen ylen zlen)
+  `(GET_IDXYZL (GET_IDX_PERIOD ,x ,xlen) (GET_IDX_PERIOD ,y ,ylen) (GET_IDX_PERIOD ,z ,zlen) 0 1 ,xlen ,ylen ,zlen)
+  )
+(defmacro fffor_from_to (k j i kmi jmi imi kma jma ima . body)
+  `(block
+     (declare-long ,i ,j ,k)
+     (for (set! ,i ,imi) (< ,i ,ima) (set! ,i (+ ,i 1))
+       (for (set! ,j ,jmi) (< ,j ,jma) (set! ,j (+ ,j 1))
+	 (for (set! ,k ,kmi) (< ,k ,kma) (set! ,k (+ ,k 1)) . ,body)
+	)
+       )
+     ))
+
+(defmacro fffor_from_to (k j i kmi jmi imi kma jma ima . body)
+
+  `(begin
+     ;(pure-text "\n#pragma clang loop unroll (disable)\n")
+     (inner-for-from-to ,i ,imi ,ima
+       ;(pure-text "\n#pragma clang loop unroll (disable)\n")
+       (inner-for-from-to ,j ,jmi ,jma
+	 (inner-for-from-to ,k ,kmi ,kma . ,body)
+	 )
+       ))
+  )
+
+(define-scmc-global envof-args 
+  (fast-make-single-env-from-var-and-val '((int . PS_INT_NUM) (long . PS_LONG_NUM) (float . PS_FLOAT_NUM) (double . PS_DOUBLE_NUM) (char . PS_CHAR) (short . PS_SHORT_NUM))))
+(define-scmc-global find-ps-type 
+  (lambda (ctype)
+    (fast-find-var-in-single-env ctype envof-args)
+    ))
+(define-scmc-global alloc-set-kernel-nonvec-parameter 
+  (lambda (rt kername para type typeid ker_var)
+    (define theallname (multi-concat rt 'alloc_prefix_ para))
+    `(begin
+       (declare ,(concat rt 'pscmc_mem) ,theallname)
+       (,(multi-concat rt 'pscmc_mem_init ) pe ("&" ,theallname) ,typeid 0)
+       (vector-set! (type-convert ,(concat type "*") (struct-ref ,theallname h_data)) 0 ,para) 
+       (,(multi-concat rt kername '_scmc_set_parameter_ para) ,ker_var ("&" ,theallname)))
+    )
+  )
+(define-scmc-global delete-kernel-novec-parameter
+  (lambda (rt para)
+    (define theallname (multi-concat rt 'alloc_prefix_ para))
+    `(,(multi-concat rt 'pscmc_mem_destroy) ("&" ,theallname))
+    )
+  )
+(define-scmc-global with-kernel-parameters-exec
+  (lambda (rt kername varlst ker_var xl yl . body)
+    (if (eq? xl -1)
+      (set! xl `(,(multi-concat rt kername '_get_xlen)))
+      0
+      )
+    (with-kernel-parameters rt kername varlst ker_var 
+      `(begin . ,(append body `((,(multi-concat rt kername '_exec) ,ker_var ,xl ,yl))))
+      )
+    )
+  )
+(define-scmc-global with-kernel-parameters
+  (lambda (rt kername varlst ker_var . body)
+    `(begin
+       ,(begin-map 
+	 (lambda (para)
+	   (multi-define tp na para)
+           (if (pair? tp) (set! tp (string->symbol (list->string (apply append (map (lambda (x) (string->list (symbol->string x))) tp))))) 0)
+	   ;(write tp current-error-port) (newline current-error-port)
+	   (alloc-set-kernel-nonvec-parameter rt kername na tp (find-ps-type tp) ker_var)
+	   )
+	 varlst
+	 )
+       (begin . ,body)
+       ,(begin-map 
+	  (lambda (para)
+	    (delete-kernel-novec-parameter rt (cadr para))
+	    )
+	  varlst
+	  )
+       )
+    )
+  )
+(define-scmc-global get-kernel-names 
+  (lambda (fname)
+    (define fp (open-input-file fname))
+    (read fp) 
+    (define alldefs (read fp))
+    (map 
+      (lambda (x)
+	;(write x current-error-port) (newline current-error-port)
+	(define name (string->list (symbol->string (car x))))
+	;(write name current-error-port) (newline current-error-port)
+	(let loop ((name name))
+	  (cond
+	    ((eq? (car name) '#\_) (string->symbol (list->string (cdr name))))
+	    (else (loop (cdr name)))
+	    )
+	  )
+	) 
+      alldefs)
+    ))
+  
+
+(defmacro input-all-pscmc-struct dirprefix
+  (define cctpfx
+    (cond
+      ((null? dirprefix) "")
+      (else (car dirprefix))
+      ))
+  (cons 'begin
+    (map 
+      (lambda (rt) 
+	`(include- ,(multi-concat cctpfx (car rt) "/" (car rt) "pscmc_inc.h"))
+	) 
+      runtimes
+      )
+    )
+
+  )
+(defmacro input-all-kernel-and-rt dirprefix
+  (define cctpfx
+    (cond
+      ((null? dirprefix) "")
+      (else (car dirprefix))
+      ))
+  (cons 'begin
+    (map 
+      (lambda (rt) 
+	;(write (list dirprefix (car rt) LIBNAME) current-error-port) (newline current-error-port)
+	`(begin . 
+	   ,(append (map (lambda (kf) `(include- ,(multi-concat cctpfx (car rt) "/" kf ".kernel_inc.h"))) kernel_files)
+	   `((include- ,(multi-concat cctpfx  (car rt) LIBNAME ".h"))))
+	   )
+	)
+      runtimes
+      )
+    )
+
+  )
+
+(define-scmc-global fun-setp-class 
+  (lambda (classname var)
+    `(set! (structp-ref ,classname ,var) ,var))
+  )
+
+(defmacro getpscmctypebynum (num)
+  (let loop ((rts runtimes) (n 0))
+    (cond
+      ((null? rts) `(return 0))
+      (else
+	`(if (== ,num ,n)
+	   (return (sizeof ,(multi-concat (caar rts) "pscmc_mem")))
+	   ,(loop (cdr rts) (+ n 1))
+	   )
+	)
+      )
+    ) 
+  )
+(define-scmc-global choose_the_runtime_procedure 
+  (lambda (symbol statement . cdtype)
+    (define thecdtype (if (null? cdtype) 'CD_type (car cdtype)))
+    (define num -1)
+    
+      (let loop ((runtimes runtimes))
+	(cond 
+	  ((null? runtimes) 0)
+	  (else
+	    (define rtpfx (caar runtimes))
+	    (define real_statement (replace-all statement symbol (concat rtpfx symbol)))
+	    (set! num (+ num 1))
+	    `(if (== ,num ,thecdtype)
+	       ,real_statement
+	       ,(loop (cdr runtimes))
+	       )))
+	)
+      )
+  )
+
+(defmacro choose_the_runtime (symbol_name_or_funcall . cdtype)
+  (define thecdtype (if (null? cdtype) 'CD_type (car cdtype)))
+  (define thesym (if (pair? symbol_name_or_funcall) (car symbol_name_or_funcall) symbol_name_or_funcall))
+  (choose_the_runtime_procedure thesym symbol_name_or_funcall thecdtype)
+  )
+;(define-scmc-global switch_call_runtime (lambda (name num) `(begin .  ,(map (lambda (rt) (set! rt (car rt)) ()) runtimes))))
+(defmacro TYPE_MALLOC (type len)
+  `(malloc (* (sizeof ,type) ,len))
+  )
+(defmacro setpthisvarmalloc (name type len)
+  `(set! (structp-ref pthis ,name) (TYPE_MALLOC ,type ,len))
+  )
+
+(define-scmc-global fun_gtnmbn 
+  (lambda (num)
+    (let loop ((rts runtimes) (n 0))
+      ((null? rts) (write-string "Error in fun_gtnmbn: no runtime found\n" current-error-port) (car 0))
+      ((eq? num n)
+	(caar rts)
+	)
+      (else (loop (cdr runtimes) (+ n 1)))
+      ))
+  )
+
+(defmacro getxyz_blks (glid xb yb zb . pname)
+  (define nm1 (if (null? pname) 'bxyz (car pname)))
+  `(begin 
+     (define-long ,(concat nm1 'x) (remainder ,glid ,xb))
+     (define-long ,(concat nm1 'y) (remainder (/ ,glid ,xb) ,yb))
+     (define-long ,(concat nm1 'z) (/ ,glid (* ,xb ,yb)))
+     )
+  )
+(defmacro get-offset-id3 (x y z xo yo zo xb yb zb)
+  `(GET_IDXYZL (+ ,x ,xo) (+ ,yo ,y) (+ ,zo ,z) 0 1 ,xb ,yb ,zb)
+  )
+(defmacro get-offset-id4 (x y z l xo yo zo lmax xb yb zb)
+  `(GET_IDXYZL (+ ,x ,xo) (+ ,yo ,y) (+ ,zo ,z) ,l ,lmax ,xb ,yb ,zb)
+  )
+(defmacro IFRANK0 (expr)
+  `(begin
+     (PS_MPI_Barrier PS_MPI_COMM_WORLD)
+     (define-int rank)
+     (PS_MPI_Comm_rank PS_MPI_COMM_WORLD ("&" rank))
+     (if (eq? rank 0)
+       ,expr
+       ))
+  )
+
+(defmacro PERFORMANCE_TIME (dbg_str . default_time_mark)
+  (define dtm 'curt_profile_only)
+  (if (not (null? default_time_mark)) (set! dtm (car default_time_mark)) 0)
+  `(if USE_PROFILE
+     (begin
+       (PS_MPI_Barrier PS_MPI_COMM_WORLD)
+       (define-double cur_time (wclk_now))
+       (IFRANK0 (LOG_RECORD_INFO "%s: %fs\n" ,dbg_str (- cur_time ,dtm)))
+       (set! ,dtm cur_time)
+       )
+     )
+  )
+(defmacro GET_SPARSE_MEMORY (dest from num_block b_stride b_size . sync_id)
+  (case RUNTIME
+    ('SWMC
+      `(if (* ,num_block ,b_size)
+	 (begin
+	   (,(if VOLATILE-FREE 'define-int 'define-volatile-int ) lgd_swmc 0)
+	   (define-const-size_t data_size (sizeof-var (vector-ref ,from 0)))
+	   (,(if VOLATILE-FREE (if (eq? VOLATILE-FREE 1) 'athread_get_procedure 'swmc_athread_get_procedue ) 'athread_get) PE_MODE ,from ,dest (* ,b_size ,num_block data_size) ("&" ,(if (null? sync_id) 'lgd_swmc (car sync_id))) 0 (* (- ,b_stride ,b_size) data_size) ,(if (eq? b_size b_stride) 0 `(* ,b_size data_size)))
+	   ,(if (null? sync_id) `(while (neq? lgd_swmc 1)) `(incf! ,(concat (car sync_id) '_swmc_shadow))))
+	)
+      )
+    (else
+      `(block
+	 ;(define inner_step 0)
+	 (inner-for-from-to inner_step 0 ,num_block
+	   ;(define inner_g 0)
+	   (inner-for-from-to inner_g 0 ,b_size
+	     (vector-set! ,dest (+ (* inner_step ,b_size) inner_g) (vector-ref ,from (+ (* inner_step ,b_stride) inner_g))))
+	   )
+	 ))
+    )
+
+  )
+   
+(defmacro GET_CONT_MEMORY (dest from b_size . sync_id)
+  `(GET_SPARSE_MEMORY ,dest ,from ,b_size 1 1 . ,sync_id)
+  )
+(defmacro PUT_SPARSE_MEMORY (dest from num_block b_stride b_size . sync_id)
+  (case RUNTIME
+    ('SWMC
+      `(if (* ,num_block ,b_size)
+	 (begin
+	   ;(define-volatile-int lgd_swmc 0)
+	   (,(if VOLATILE-FREE 'define-int 'define-volatile-int ) lgd_swmc 0)
+	   (define-const-size_t data_size (sizeof-var (vector-ref ,from 0)))
+	   (,(if VOLATILE-FREE (if (eq? VOLATILE-FREE 1) 'athread_put_procedue 'swmc_athread_put_procedue) 'athread_put) PE_MODE ,from ,dest (* data_size ,b_size ,num_block) ("&" ,(if (null? sync_id) 'lgd_swmc (car sync_id))) (* data_size (- ,b_stride ,b_size)) ,(if (eq? b_size b_stride) 0 `(* ,b_size data_size)))
+	   ,(if (null? sync_id) `(while (neq? lgd_swmc 1)) `(incf! ,(concat (car sync_id) '_swmc_shadow))))
+	)
+      )
+    (else
+      ;(define inner_step 0)
+      `(inner-for-from-to inner_step 0 ,num_block
+	 (inner-for-from-to inner_g 0 ,b_size
+	   (force-v-set! (vector-ref ,dest (+ (* inner_step ,b_stride) inner_g)) (vector-ref ,from (+ (* inner_step ,b_size) inner_g))))
+	 )
+      ))
+  )
+(defmacro PUT_CONT_MEMORY (dest from b_size . sync_id)
+  `(PUT_SPARSE_MEMORY ,dest ,from ,b_size 1 1 . ,sync_id)
+  )
+(defmacro COPY_SPARSE_MEMORY (dest from num_block b_r_stride b_w_stride b_size . sync_id)
+  (case RUNTIME 
+    ('SWMC
+      ;(define tsize `(/ (sizeof-var (vector-ref ,from 0)) (sizeof double )))
+      (define tsize 1) 
+      (define wwsize `(* ,b_w_stride ,tsize))
+      (define wrsize `(* ,b_size ,tsize))
+      (if (eq? b_w_stride b_size) (set! wrsize wwsize) 0)
+      `(block 
+         ;(ASSERT (== (sizeof-var (vector-ref ,from 0)) 8))
+	 (dec-array double tmp_array (* ,tsize ,b_size ,num_block))
+	 ;(fprintf stderr "ok here bef read %d %d\n" ,b_size ,num_block)
+	 (GET_SPARSE_MEMORY tmp_array ,from ,num_block ,b_r_stride ,b_size)
+	 ;(fprintf stderr "ok here bef write %d %d\n" ,b_size ,num_block)
+	 (PUT_SPARSE_MEMORY ,dest tmp_array ,num_block ,wwsize ,wrsize)
+	 ;(fprintf stderr "ok here aft write %d %d\n" ,b_size ,num_block)
+	 )
+      )
+    (else
+      `(block
+	 ;(define inner_step 0)
+	 (inner-for-from-to inner_step 0 ,num_block
+	   (inner-for-from-to inner_g 0 ,b_size
+	     (vector-set! ,dest (+ (* inner_step ,b_w_stride) inner_g) (vector-ref ,from (+ (* inner_step ,b_r_stride) inner_g))))
+	   )
+	 )))
+  )
+(defmacro COPY_CONT_MEMORY (dest from b_size . sync_id)
+  `(COPY_SPARSE_MEMORY ,dest ,from 1 ,b_size ,b_size ,b_size . ,sync_id)
+  )
+(defmacro INIT_ASYNC_IO_LOCK (name)
+  (case RUNTIME 
+    ('SWMC
+      `(,(if VOLATILE-FREE 'declare-int 'declare-volatile-int ) (,name 0) (,(concat name '_swmc_shadow) 0))
+      )
+    (else '())
+  )
+  )
+(defmacro WAIT_SPARSE_MEMORY (sync_id)
+  (case RUNTIME
+    ('SWMC
+      `(while (neq? ,sync_id ,(concat sync_id '_swmc_shadow)))
+      )
+    (else '()))
+  )
+(defmacro get_ptype-ptlen (the_spec)
+  `(begin 
+     (define-int ptype (vrf (structp-ref (type-convert Particle_in_Cell_MPI* pthis) o_particle_type) ,the_spec))
+     (define-int ptlen (if (b-and ptype 2) 8 6))
+     )
+  )
+(define-scmc-global PARTICLE_LEN 6)
+;(define-scmc-global NUM_CACHE_PAR 384)
+(define-scmc-global NUM_ONE_CACHE_LEN 64)
+(defmacro atomic_add_local (p a)
+  (case RUNTIME
+    ('SWMC `(block (declare-int (tmp0123212663 (vector-ref ,p 0))) (incf! (vector-ref ,p 0) ,a) tmp0123212663))
+    ('OpenMP `(block (declare-int (tmp0123212663 (vector-ref ,p 0))) (incf! (vector-ref ,p 0) ,a) tmp0123212663))
+    ('OpenCL `(atomic_add ,p ,a))
+    ('CUDA `(atomicAdd ,p ,a))
+    ('HIP `(atomicAdd ,p ,a))
+    (else `(block (declare-int (tmp0123212663 (vector-ref ,p 0))) (incf! (vector-ref ,p 0) ,a) tmp0123212663))
+    )
+  )
+
+(defmacro ASSERT (expr)
+  (case RUNTIME
+    ('OpenCL `(block (if (not ,expr) (begin (define-int* g 2) (vector-set! g 0 ,expr)))))
+    ('SWMC `(assert ,expr))
+    ('OpenMP `(assert ,expr))
+    ('COI `(assert ,expr))
+    ('CUDA `(assert ,expr))
+    ('HIP `(block (if (not ,expr) (begin (define-int* g (type-convert int* 2)) (vector-set! g 0 ,expr)))))
+    ('SYCL 0)
+    ;('HIP 0)
+    (else `(assert ,expr))
+    )
+  )
+(defmacro vrf (v . rs)
+  (cond
+    ((null? rs) v)
+    (else
+      (define lst (reverse rs))
+      (define rem (reverse (cdr lst)))
+      (set! lst (car lst))
+      `(vector-ref (vrf ,v . ,rem) ,lst)
+      )
+    )
+  )
+
+(define-scmc-global get-vec-scal-from-args
+  (lambda (args)
+    (define vec_args '())
+    (define scal_args '())
+    (map 
+      (lambda (vr)
+	(multi-define type name vr)
+	(if (eq? (car (reverse type)) '*)
+	  (set! vec_args (cons (list name) vec_args))
+	  (set! scal_args (cons (list (car type) name) scal_args))
+	  )
+	)
+      args
+      )
+    (list vec_args scal_args)
+    )
+  )
+(define-scmc-global if_isgpu 
+  (lambda (expr1 expr2)
+    (if (isinlst RUNTIME '(OpenCL CUDA HIP SYCL))
+      expr1
+      expr2
+      )
+    )
+  )
+(define-scmc-global get-name-arg-env-pair 
+  (lambda (ssfilename)
+    (define (remove-scmc-prefix nm)
+      (define name (string->list (symbol->string nm)))
+      (let loop ((name name))
+	  (cond
+	    ((eq? (car name) '#\_) (string->symbol (list->string (cdr name))))
+	    (else (loop (cdr name)))
+	    )
+	  )
+      )
+    (define fp (open-input-file ssfilename))
+    (define ker_defs (read fp))
+    (define ker_defs (read fp))
+    (close-input-port fp)
+    (map 
+      (lambda (x)
+	(cons (remove-scmc-prefix (car x)) (cdr x))
+	)
+      ker_defs)
+    ))
+(define-scmc-global get_vec_scal_args 
+  (lambda (ssfilename fun_name)
+    (define fp (open-input-file ssfilename))
+    (define ker_defs (read fp))
+    (define ker_defs (read fp))
+    ;(write ker_defs current-error-port) (newline current-error-port)
+    (close-input-port fp)
+    (let loop ((ker_defs ker_defs))
+      (cond
+	((null? ker_defs) (write-string "Error: no fun_name found\n" current-error-port))
+	(else
+	  (define fstc (car ker_defs))
+	  (multi-define name args fstc)
+	  (if #t ;(eq? name fun_name)
+	    (begin
+	      (define vec_args '())
+	      (define scal_args '())
+	      (map 
+		(lambda (vr)
+		  (multi-define type name vr)
+		  (if (eq? (car (reverse type)) '*)
+		    (set! vec_args (cons (list name) vec_args))
+		    (set! scal_args (cons (list (car type) name) scal_args))
+		    )
+		  )
+		args
+		)
+	      (list vec_args scal_args)
+	      )
+	    (loop (cdr ker_defs))
+	    )
+	  )
+	)
+      )
+    )
+  )
+
+(define-scmc-global gen-pscmc-kernel-vector
+  (lambda (rt structkervars-kernamevectors)
+    (map 
+      (lambda (kervar-kername)
+	(multi-define kervar kername kervar-kername)
+	;(write kervar-kername current-error-port) (newline current-error-port)
+	`(begin
+	   ;(set! (structp-ref pthis ,kervar) (TYPE_MALLOC void* (length kername)))
+	   . 
+	   ,(let loop ((kername kername) (n 0))
+	      (cond
+		((null? kername) '())
+		(else
+		  (define carname (car kername))
+		  (cons
+		  `(block
+		     (declare size_t structlen)
+		     (,(multi-concat rt carname "_get_struct_len") ("&" structlen))
+		     (vector-set! (structp-ref pthis ,kervar) ,n (malloc structlen))
+		     (,(multi-concat rt carname "_init") pe (vector-ref (structp-ref pthis ,kervar) ,n))
+		     ) (loop (cdr kername) (+ n 1)))
+		  )
+		)
+	      )
+	   )
+	) structkervars-kernamevectors)
+    )
+  )
+
+(define-scmc-global gen-pscmc-vars-scal 
+  (lambda (rt vars-types-len)
+    (map
+      (lambda (var-type-len)
+	(multi-define var type len var-type-len)
+	`(begin
+	   (set! (structp-ref pthis ,var) (TYPE_MALLOC ,(multi-concat rt "pscmc_mem") 1))
+	   (,(multi-concat rt "pscmc_mem_init") pe (structp-ref pthis ,var) ,(find-ps-type type) ,len)
+	   )
+	) vars-types-len
+      )
+    ))
+
+(define-scmc-global gen-pscmc-vars-vector
+  (lambda (rt vars-types-nums-lens)
+    (append
+      ;`((set! (structp-ref pthis ,var) (TYPE_MALLOC void* ,num)))
+      (map
+	(lambda (var-type-num-len)
+	  (multi-define var type num len var-type-len)
+	  `(begin
+	     (for-from-to i 0 ,num
+	       (set! (vector-ref (structp-ref pthis ,var) i) (TYPE_MALLOC ,(multi-concat rt "pscmc_mem" 1)))
+	       (,(multi-concat rt "pscmc_mem_init") pe (vector-ref (structp-ref pthis ,var) i) ,(find-ps-type type) ,len))
+	     )
+	  ) vars-types-nums-lens
+	))
+    ))
+(define-scmc-global gen-field3d-mpi-shell
+  (lambda (prefix mpi_var-kernames-vars)
+    (multi-define mpi-var-type mpi-var kernames-vars mpi_var-kernames-vars)
+	   ;(write mpi-var current-error-port) (newline current-error-port)
+    `(begin 
+      ,(gen-field3d-seq-shell prefix kernames-vars)
+      .
+      ,(map 
+	 (lambda (kername-var-kpara)
+	   (multi-define kername ker_structp var kpara pre_exec kername-var-kpara)
+	   (define core-var (map (lambda (x) (car (reverse x))) var))
+	   `(begin
+	      (defun-class-Field3D_MPI ,(multi-concat 'Field3D_MPI_ prefix kername) int ,mpi-var-type
+		(for-from-to i 0 num_runtime 
+		  (,(multi-concat 'Field3D_Seq_ prefix kername) (+ data i) . ,mpi-var)
+		  )
+		(return 0)
+		)
+
+	      )
+	   ) kernames-vars))
+    )
+  )
+(defmacro LOG_RECORD_LEVEL (level str . fmt)
+  (cond
+    ((> level LOG_LEVEL_PRE)
+      '()
+      )
+    ((>= level 3) 
+      `(fprintf stderr ,str . ,fmt)
+      )
+    (else
+      `(fprintf stdout ,str . ,fmt)
+      )
+    )
+  )
+(defmacro LOG_RECORD_DEBUG (str . fmt)
+  `(LOG_RECORD_LEVEL 6 ,str . ,fmt)
+  )
+(defmacro LOG_RECORD_PERF (str . fmt)
+  `(LOG_RECORD_LEVEL 5 ,str . ,fmt)
+  )
+(defmacro LOG_RECORD_OUT (str . fmt)
+  `(LOG_RECORD_LEVEL 1 ,str . ,fmt)
+  )
+(defmacro LOG_RECORD_INFO (str . fmt)
+  `(LOG_RECORD_LEVEL 3 ,str . ,fmt)
+  )
+(define-scmc-global gen-field3d-seq-shell 
+  (lambda (prefix kernames-vars)
+    (begin-map 
+      (lambda (kername-var-kpara)
+	(multi-define kername ker_structp var kpara pre_exec kername-var-kpara)
+	(define core-var (map (lambda (x) (car (reverse x))) var))
+	`(begin
+	   (defun-class-Field3D_Seq ,(multi-concat 'Field3D_Seq_ prefix kername) int ,var
+	      (choose_the_runtime (,(multi-concat 'Field3D_Seq_ kername) pthis . ,core-var))
+	      (return 0)
+	      )
+	   ,(begin-map 
+	      (lambda (rt) 
+		`(defun-class-Field3D_Seq ,(multi-concat rt 'Field3D_Seq_ kername) int ,var
+		   ,(pre_exec rt kername ker_structp)
+		   ,(with-kernel-parameters rt kername kpara ker_structp 
+		      `(,(multi-concat rt kername '_exec) ,ker_structp (,(multi-concat rt kername '_get_xlen)) numvec)
+		      )
+		   (return 0)
+		   )
+		)
+	      (map car runtimes)
+	      )
+	   
+	   )
+	)
+      kernames-vars
+      )
+    ))
+(defmacro set-pthis varnames
+  (begin-map 
+    (lambda (varname)
+      `(set! (structp-ref pthis ,varname) ,varname)
+      )
+    varnames
+    )
+  )
+
+(defmacro parallel-put-memory (to from num . sync)
+  (cond
+    ((eq? RUNTIME 'SWMC) `(PUT_CONT_MEMORY ,to ,from ,num . ,sync))
+    ((isinlst RUNTIME '(C OpenMP COI))
+      `(inner-for-from-to Gll_P9918 0 ,num
+	 (vector-set! ,to Gll_P9918 (vector-ref ,from Gll_P9918))
+	 )
+      )
+    (else
+      `(block
+	 (define lgGG817621_1 0)
+	 (for 0 (< lgGG817621_1 ,num) (incf! lgGG817621_1 __xlen)
+	   (define-int ridx (+ lgGG817621_1 __idx))
+	   (if (< ridx ,num)
+	     (vector-set! ,to ridx (vector-ref ,from ridx))
+	     )
+	 )
+	 )
+      )
+    )
+  )
+(defmacro parallel-get-small-block (to from to-dimarr from-dimarr)
+  '()
+  )
+(defmacro parallel-move-memory (to from num . sync)
+  (define sym0 (gensym))
+  `(block
+     (define ,sym0 ,num)
+     (for 0 (> ,sym0 0) (incf! ,sym0 -__xlen)
+       (define-int ridx (+ ,sym0 __idx -__xlen))
+       (if (>= ridx 0)
+	 (vector-set! ,to ridx (vector-ref ,from ridx))
+	 )
+       )
+     )
+      
+    
+  )
+(defmacro parallel-get-memory (to from num . sync)
+  (define sym0 (gensym))
+  (case RUNTIME
+    ('SWMC `(GET_CONT_MEMORY ,to ,from ,num . ,sync))
+    (else
+      `(block
+	 (define ,sym0 0)
+	 (for 0 (< ,sym0 ,num) (incf! ,sym0 __xlen)
+	   (define-int ridx (+ ,sym0 __idx))
+	   (if (< ridx ,num)
+	     (vector-set! ,to ridx (vector-ref ,from ridx))
+	     )
+	 )
+	 )
+      )
+    )
+  )
+(define-scmc-global parallel-copy-memory-gpu parallel-get-memory)
+(defmacro gen-const-vars (prefix names . mode)
+  (if (null? mode) (set! mode 0) (set! mode (car mode)))
+  ;(write (list mode names) current-error-port) (newline current-error-port)
+  (case mode
+    (0
+      (begin-map
+	(lambda (n)
+	  `(define-double ,(multi-concat prefix n) (call_GET_VAR ,(symbol->string n)))
+	  ) names
+	)
+      )
+    (1 
+      (begin-map
+	(lambda (n)
+	  `(define-double ,(multi-concat prefix n))
+	  )
+	names
+	)
+      )
+    (2 
+      (begin-map
+	(lambda (n)
+	  `(set! ,(multi-concat prefix n) (call_GET_VAR ,(symbol->string n)))
+	  ) names
+	)
+      )
+    (else '())
+    )
+  )
+(define-scmc-global global_init-seq-fun '())
+(define-scmc-global global_del-seq-fun '())
+(define-scmc-global global_call-seq-fun '())
+(define-scmc-global global_call-mpi-fun '())
+(define-scmc-global global_num-kers 0)
+(define-scmc-global global_kernel-var 'inner_kernel)
+(define-scmc-global generate_class_kernel_codes
+  (lambda (classes kernel_file)
+    (define name_env_pair (get-name-arg-env-pair kernel_file))
+    (let loop ((name_env_pair name_env_pair))
+      (cond
+	((null? name_env_pair) '())
+	(else
+	  (multi-define ker-name args (car name_env_pair))
+	  (set! global_init-seq-fun 
+	    (cons 
+	      `(block
+		 (declare size_t structlen)
+		 (choose_the_runtime (,(multi-concat ker-name "_get_struct_len") ("&" structlen) ))
+		 (vector-set! (structp-ref pthis ,global_kernel-var) ,global_num-kers (malloc structlen))
+		 (choose_the_runtime (,(multi-concat ker-name "_init") pe (vector-ref (structp-ref pthis ,global_kernel-var) ,global_num-kers)))
+		 )
+	      global_init-seq-fun))
+	  (set! global_del-seq-fun 
+	    (cons 
+	      `(block
+		 ) global_del-seq-fun))
+	  (define a 0)
+	  (set! global_call-seq-fun 
+	    (cons
+	      (lambda (rt)
+		`(defun ,(apply multi-concat (cons rt (append (apply append (map (lambda (x) (list x '__)))) (list '__ ker-name)))) int ()
+		   (return 0)
+		   ))
+	      global_call-seq-fun)
+	    )
+	  (incf! global_num-kers)
+	  )
+	)
+      )
+    )
+  )
+(defmacro init_pthis_mpi_fields (pthis args from)
+  (begin-map
+    (lambda (x)
+      `(begin
+	 (set! (structp-ref ,pthis ,x) (malloc (sizeof Field3D_MPI)))
+	 (init_Field3D_MPI_from (structp-ref ,pthis ,x) ,from)
+	 )
+      )
+    args
+    )
+  )
+(defmacro CG_LINEAR_FINDMAX (x)
+  `(blas_findmax_Field3D_MPI ,x ,x)
+  )
+(defmacro CG_LINEAR_SETZERO (x)
+  `(blas_yiszero_Field3D_MPI ,x ,x)
+  )
+(defmacro CG_LINEAR_YISAX (y a x)
+  `(blas_yisax_Field3D_MPI ,y ,y ,a ,x)
+  )
+(defmacro CG_LINEAR_AXPY (y a x)
+  `(blas_axpy_Field3D_MPI ,y ,y ,a ,x)
+  )
+(defmacro CG_LINEAR_AXPBY (y a x b)
+  `(blas_axpby_Field3D_MPI ,y ,y ,a ,x ,b)
+  )
+(defmacro CG_LINEAR_DOTXY (y x)
+  `(blas_dot_Field3D_MPI ,x ,y ,x)
+  )
+(defmacro if_rel_ncr var
+  `(if use_rel_ncr
+     (begin . ,var) ()
+     )
+  )
+

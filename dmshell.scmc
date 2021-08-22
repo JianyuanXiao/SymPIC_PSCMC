@@ -1,0 +1,31 @@
+;paravec.scmc general_macros.scmc fdtd_helper.scmc mur_abc.kernel.def.ss yeefdtd.kernel.def.ss dm.kernel.def.ss multi-array-pscmc.scmc dmbihamt.kernel.def.ss
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") (load "multi-array-pscmc.scmc") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(include< "assert.h")
+;(include- "c_/c_pscmc_inc.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include- "space_filling_curve.h")
+(include- "mpifields.h")
+
+(input-scmc "fdtd_helper.scmc")
+
+(gen-kernel-set dm defaults "dm.kernel.def.ss")
+(gen-kernel-set dmbihamt defaults "dmbihamt.kernel.def.ss")
+(gen-kernel-set dm8x8 defaults "dm8x8.kernel.def.ss")
+
+(eval-scmc-global
+  (gen-array-funs       
+    (append 
+      (gen-local-array-funs dm dm_kernels (A1 A2 phi_in phi_1))
+      (gen-local-array-funs dmbihamt dmbihamt_kernels (A1 phi_in))
+      (gen-local-array-funs dm8x8 dm8x8_kernels (A1 phi_in))
+      ) 'dmonly)
+
+  )
+
+

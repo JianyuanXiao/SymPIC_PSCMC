@@ -1,0 +1,314 @@
+
+;(input-scmc "pscmc_config_runtime.ss")
+(input-scmc "../general_macros.scmc")
+(input-scmc "../sort_macros.scmc")
+(input-scmc "../simd_intrin_config.scmc")
+
+(input-include "local_header.h")
+;(eval-scmc-global (begin (system "./genDECscheme.sh > decscheme.ss") '()))
+(eval-scmc-global (begin (load "../decscheme.ss") '()));this loads fl[0-9]
+(eval-scmc-global (begin (load "../genr0r1r2.ss") '()))
+
+(eval-scmc-global 
+  (cond 
+    ((or (eq? RUNTIME 'C) (eq? RUNTIME 'OpenMP) (eq? RUNTIME 'SWMC))
+      `(begin 
+	 (include< "stdio.h")
+	 ,(if USE_INTRIN
+	    `(include< ,SIMD_HEADER)
+	    '()
+	    )
+	 )
+      )
+    (else '())
+    )
+  )
+(input-scmc "../particle_macros.scmc")
+
+(define-scmc-global Elen 6)
+
+
+(eval-scmc-global 
+  (begin
+    (define (gen_pass_xyz xyz-dir dt )
+      ;map of local_particle_head
+      (define Bidxyzvec #(Bidx Bidy Bidz Bidx Bidy Bidz))
+      (define rBidxyzvec #(rBidx rBidy rBidz rBidx rBidy rBidz))
+      (define rxyzvec #(rx ry rz rx ry rz))
+      (define xyzvec #(xyzx xyzy xyzz xyzx xyzy xyzz))
+      (define rBidx (vector-ref rBidxyzvec (- 3 xyz-dir)))
+      (define rBidy (vector-ref rBidxyzvec (- 4 xyz-dir)))
+      (define rBidz (vector-ref rBidxyzvec (- 5 xyz-dir)))
+      (define Bidx (vector-ref Bidxyzvec xyz-dir))
+      (define Bidy (vector-ref Bidxyzvec (+ xyz-dir 1)))
+      (define Bidz (vector-ref Bidxyzvec (+ xyz-dir 2)))
+      (define ynum (remainder (+ xyz-dir 1) 3))
+      (define znum (remainder (+ xyz-dir 2) 3))
+      (define rx (vector-ref rxyzvec (- 3 xyz-dir)))
+      (define ry (vector-ref rxyzvec (- 4 xyz-dir)))
+      (define rz (vector-ref rxyzvec (- 5 xyz-dir)))
+      (define xxyzx (vector-ref xyzvec (- 3 xyz-dir)))
+      (define xxyzy (vector-ref xyzvec (- 4 xyz-dir)))
+      (define xxyzz (vector-ref xyzvec (- 5 xyz-dir)))
+      (define numdir xyz-dir)
+      (define delta_l (vector-ref #(DELTA_X DELTA_Y DELTA_Z) numdir))
+      (define delta_ly (vector-ref #(DELTA_X DELTA_Y DELTA_Z) ynum))
+      (define delta_lz (vector-ref #(DELTA_X DELTA_Y DELTA_Z) znum))
+
+      `(block
+	 (define-double grid_geo (/ ,delta_l (* ,delta_ly ,delta_lz)))
+	 (define-double grid_geo_py (/ 1.0 (* ,delta_ly ,delta_ly)))
+	 (define-double grid_geo_pz (/ 1.0 (* ,delta_lz ,delta_lz)))
+	 (define-double xx (vrf local_particle_head ,numdir))
+	 (define-double xy (vrf local_particle_head ,ynum))
+	 (define-double xz (vrf local_particle_head ,znum))
+	 (declare-int (rBidx (floor xx)) (rBidy (floor xy)) (rBidz (floor xz)))
+	 ;(define Midx Bidx)
+	 ;(define Midy Bidy)
+	 ;(define Midz Bidz)
+	 ;(set! Bidx (- Bidx 2))
+	 ;(set! Bidy (- Bidy 2))
+	 ;(set! Bidz (- Bidz 2))
+	 (define-double QE_MASS (/ Charge0 Mass0))
+	 (define-double rx (- xx rBidx))
+	 (define-double ry (- xy rBidy))
+	 (define-double rz (- xz rBidz))
+	 (define vx (vrf local_particle_head ,(+ numdir 3)))
+	 ;(if (> (* Deltat vx Deltat vx) 0.25) (fprintf stderr "warning: vx=%e dt=%e\n" vx Deltat))
+	 (define-double Iby 0)
+	 (define-double Ibz 0)
+	 (dec-array double fBy_y 5)
+	 (dec-array double fBy_z 5)
+	 (dec-array double fBz_z 5)
+	 (dec-array double fBz_y 5)
+	 (dec-array double fBy_x 5)
+	 (dec-array double fBy_xplus 5)
+	 (inner-for-from-to i 0 5
+	   ,(begin-map
+	      (lambda (x)
+		`(vector-set! ,x i 0)
+		)
+	      '(fBy_y fBy_z fBz_z fBz_y fBy_x fBy_xplus)
+	      )
+	   )
+	 (define-double xxplus)
+	 (set! xxplus (+ xx (* ,dt vx)))
+	 (define-int l_xoff (- (floor xx) ,Bidx))
+	 (define-int l_yoff (- (floor xy) ,Bidy))
+	 (define-int l_zoff (- (floor xz) ,Bidz))
+	 ;(fprintf stderr "off=%d %d %d x=[%e %e %e] B=%d %d %d\n" l_xoff l_yoff l_zoff xx xy xz ,Bidx ,Bidy ,Bidz)
+	 (define-int l_xplus_off (- (floor xxplus) ,Bidx))
+
+	 (vector-set! fBy_y (+ 1 l_yoff) ,(fl0 'ry))
+	 (vector-set! fBy_y (+ 2 l_yoff) ,(fl1 'ry))
+	 (vector-set! fBy_y (+ 3 l_yoff) ,(fl2 'ry))
+	 (vector-set! fBy_y (+ 4 l_yoff) ,(fl3 'ry))
+
+	 (vector-set! fBy_z (+ 1 l_zoff) ,(fl4 'rz))
+	 (vector-set! fBy_z (+ 2 l_zoff) ,(fl5 'rz))
+	 (vector-set! fBy_z (+ 3 l_zoff) ,(fl6 'rz))
+
+	 (vector-set! fBz_z (+ 1 l_zoff) ,(fl0 'rz))
+	 (vector-set! fBz_z (+ 2 l_zoff) ,(fl1 'rz))
+	 (vector-set! fBz_z (+ 3 l_zoff) ,(fl2 'rz))
+	 (vector-set! fBz_z (+ 4 l_zoff) ,(fl3 'rz))
+
+	 (vector-set! fBz_y (+ 1 l_yoff) ,(fl4 'ry))
+	 (vector-set! fBz_y (+ 2 l_yoff) ,(fl5 'ry))
+	 (vector-set! fBz_y (+ 3 l_yoff) ,(fl6 'ry))
+
+	 (vector-set! fBy_x 0 1.0)
+	 (vector-set! fBy_x 1 1.0)
+	 (vector-set! fBy_x (+ 1 l_xoff) ,(fl7 'rx))
+	 (vector-set! fBy_x (+ 2 l_xoff) ,(fl8 'rx))
+	 (vector-set! fBy_x (+ 3 l_xoff) ,(fl9 'rx))
+	 ;(fprintf "%e\n")
+
+	 (define-double rx_plus (- xxplus (floor xxplus)))
+	 (vector-set! fBy_xplus 0 1.0)
+	 (vector-set! fBy_xplus 1 1.0)
+	 (vector-set! fBy_xplus (+ 1 l_xplus_off) ,(fl7 'rx_plus))
+	 (vector-set! fBy_xplus (+ 2 l_xplus_off) ,(fl8 'rx_plus))
+	 (vector-set! fBy_xplus (+ 3 l_xplus_off) ,(fl9 'rx_plus))
+	   
+
+	 (inner-for-from-to xyzz 0 5
+	   (inner-for-from-to xyzy 0 5
+	     (inner-for-from-to xyzx 0 5
+	       (force-simd-ver
+		 (incf! Iby (* (vector-ref localB (GET_IDXYZL ,xxyzx ,xxyzy ,xxyzz ,ynum 3 5 5 5)) (- (vector-ref fBy_xplus xyzx) (vector-ref fBy_x xyzx)) (vector-ref fBy_y xyzy) (vector-ref fBy_z xyzz))) 
+		 (incf! Ibz (* (vector-ref localB (GET_IDXYZL ,xxyzx ,xxyzy ,xxyzz ,znum 3 5 5 5)) (- (vector-ref fBy_xplus xyzx) (vector-ref fBy_x xyzx)) (vector-ref fBz_y xyzy) (vector-ref fBz_z xyzz))))
+	       (block
+		 (define-double Jx)
+		 (force-simd-ver
+		   (set! Jx (* Charge0 grid_geo (- (vector-ref fBy_xplus xyzx) (vector-ref fBy_x xyzx)) (vector-ref fBy_y xyzy) (vector-ref fBz_z xyzz))))
+		 (incf! (vrf localJ (GET_IDXYZL ,xxyzx ,xxyzy ,xxyzz ,numdir 3 5 5 5)) Jx)
+		 )
+	       )
+	     )
+	   )
+	 ;(fprintf stderr "Iby=%e Ibz=%e\n" Iby Ibz)
+	 (incf! (vrf local_particle_head ,(+ znum 3)) (* QE_MASS (+ Iby) grid_geo_pz))
+	 (incf! (vrf local_particle_head ,(+ ynum 3)) (* QE_MASS (- Ibz) grid_geo_py))
+	 (incf! (vrf local_particle_head ,numdir) (* ,dt vx))
+	 )
+      )
+    
+    (define (gen_passE_calc_nogrid particle_head num_particle E_thread J_thread B_thread use-vlo use-push-r)
+      (define (gen_get_particle_data cur_idx)
+	(cons 'begin
+	  (let loop ((n 0) (xvs '(xx xy xz)))
+	    (cond
+	      ((null? xvs) '())
+	      (else
+		(cons `(define-double ,(car xvs) (vrf ,particle_head (+ ,n (* ,cur_idx ,PARTICLE_LEN))))
+		  (loop (+ n 1) (cdr xvs))
+		  )
+		)
+	      )
+	    ))
+	)
+      (if #t
+	`(if ,num_particle
+	   (begin
+	     ;(fprintf stderr "np=%d\n" ,num_particle)
+	   ,(gen_long_for_opt_loop 'g 0 num_particle 
+	      `((double local_particle_head ,particle_head ,PARTICLE_LEN)) PAR_CACHE_LEN use-push-r
+	      `(begin 
+		 (incf! (vrf local_particle_head 0) -0.5)
+		 (incf! (vrf local_particle_head 1) -0.5)
+		 (incf! (vrf local_particle_head 2) -0.5)
+		 (define-double xx (vrf local_particle_head 0))
+		 (define-double xy (vrf local_particle_head 1))
+		 (define-double xz (vrf local_particle_head 2))
+		 (define-double vx (vrf local_particle_head 3))
+		 (define-double vy (vrf local_particle_head 4))
+		 (define-double vz (vrf local_particle_head 5))
+		 (define-double grid_geo_x (/ DELTA_X (* DELTA_Y DELTA_Z)))
+		 (define-double grid_geo_y (/ DELTA_Y (* DELTA_Z DELTA_X)))
+		 (define-double grid_geo_z (/ DELTA_Z (* DELTA_X DELTA_Y)))
+		 (INIT_ASYNC_IO_LOCK get_sync_id)
+		 (INIT_ASYNC_IO_LOCK get_j_sync_id)
+		 (INIT_ASYNC_IO_LOCK put_sync_id)
+
+		 (dec-local-array double localE 192) 
+		 (dec-local-array double localJ 375) 
+		 (dec-local-array double localB 375)
+		 (declare-int (Bidx (floor (+ 0.5 xx))) (Bidy (floor (+ 0.5 xy))) (Bidz (floor (+ 0.5 xz))))
+
+		 (if 1
+		 (block
+		   (for-from-zero-to iz 4 
+		     (for-from-zero-to iy 4 
+		       (define-long total_idx (+ iy (* iz 4))) 
+		       (parallel-get-memory (+ localE (* total_idx 4 3)) (+ ,E_thread (GET_FIELD_ELEMENT_ID_KERNEL (- Bidx 1) (+ iy Bidy -1) (+ iz Bidz -1) 0 0)) (* 3 4) get_sync_id)))
+		   (define Midx Bidx)
+		   (define Midy Bidy)
+		   (define Midz Bidz)
+		   ;(set! Bidx (- Bidx 1))
+		   ;(set! Bidy (- Bidy 1))
+		   ;(set! Bidz (- Bidz 1))
+		   ;(for-from-zero-to iz 4 (for-from-zero-to iy 4 (define-long total_idx (+ iy (* iz 4))) (parallel-get-memory (+ localE (* total_idx 3 4)) (+ ,E_thread (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ iy Bidy) (+ iz Bidz) 0 0)) (* 3 4) get_sync_id)))
+		   (sync-local)
+		   (define-double QE_MASS (/ Charge0 Mass0))
+		   (define-double rx (- xx Midx))
+		   (define-double ry (- xy Midy))
+		   (define-double rz (- xz Midz))
+		   (dec-array double fEx 4)
+		   (dec-array double fEy 4)
+		   (dec-array double fEz 4)
+		   (dec-array double fdEx 3)
+		   (dec-array double fdEy 3)
+		   (dec-array double fdEz 3)
+		   (define-double AllEx 0)
+		   (define-double AllEy 0)
+		   (define-double AllEz 0)
+		   (constant-for-from-to i 0 4
+		     (force-simd-ver
+		       (vector-set! fEx i (eval-scmc-global (eval (list (concat 'fl (number->string i)) 	   ''rx))))
+		       (vector-set! fEy i (eval-scmc-global (eval (list (concat 'fl (number->string i)) 	   ''ry))))
+		       (vector-set! fEz i (eval-scmc-global (eval (list (concat 'fl (number->string i)) 	   ''rz)))))
+		     )
+		   (constant-for-from-to i 0 3
+		     (force-simd-ver
+		       (vector-set! fdEx i (eval-scmc-global (eval (list (concat 'fl (number->string (+ 4 i))) ''rx))))
+		       (vector-set! fdEy i (eval-scmc-global (eval (list (concat 'fl (number->string (+ 4 i))) ''ry))))
+		       (vector-set! fdEz i (eval-scmc-global (eval (list (concat 'fl (number->string (+ 4 i))) ''rz)))))
+		     )
+		   (inner-for-from-to idz 0 4
+		     (inner-for-from-to __idy 0 4
+		       (inner-for-from-to __idx 0 3
+			 (force-simd-ver
+			   (set! AllEx (+ AllEx (* (vector-ref localE (paraids __idx __idy idz 0 4)) (vector-ref fdEx __idx) (vector-ref fEy __idy) (vector-ref fEz idz))))
+			   (set! AllEy (+ AllEy (* (vector-ref localE (paraids idz __idx __idy 1 4)) (vector-ref fdEy __idx) (vector-ref fEz __idy) (vector-ref fEx idz))))
+			   (set! AllEz (+ AllEz (* (vector-ref localE (paraids __idy idz __idx 2 4)) (vector-ref fdEz __idx) (vector-ref fEx __idy) (vector-ref fEy idz)))))
+			 )))
+		   ;(fprintf stderr "E=[%e %e %e]\n" AllEx AllEy AllEz)
+		   (declare-double allincfvx allincfvy allincfvz)
+		   (force-simd-ver
+		     (set! allincfvx (/ (* Deltat N_l QE_MASS AllEx) (* DELTA_X DELTA_X)))
+		     (set! allincfvy (/ (* Deltat N_l QE_MASS AllEy) (* DELTA_Y DELTA_Y)))
+		     (set! allincfvz (/ (* Deltat N_l QE_MASS AllEz) (* DELTA_Z DELTA_Z)))
+		     )
+		   (incf! (vrf local_particle_head 3) allincfvx)
+		   (incf! (vrf local_particle_head 4) allincfvy)
+		   (incf! (vrf local_particle_head 5) allincfvz)
+		   ))
+
+		 ;(fprintf stderr "Bid=[%d %d %d]\n" Bidx Bidy Bidz)
+		 (for-from-zero-to iz 5 
+		   (for-from-zero-to iy 5 
+		     (define-long total_idx (+ iy (* iz 5))) 
+		     (parallel-get-memory (+ localB (* total_idx 5 3)) (+ ,B_thread (GET_FIELD_ELEMENT_ID_KERNEL (- Bidx 2) (+ iy Bidy -2) (+ iz Bidz -2) 0 0)) (* 3 5) get_sync_id)
+		     )
+		   )
+		 ;(fprintf stderr "x=[%e %e %e] v=[%e %e %e]\n" xx xy xz vx vy vz)
+		 (block
+		   (for-from-zero-to iz 5 
+		     (for-from-zero-to iy 5 
+		       (define-long total_idx (+ iy (* iz 5))) 
+		       (parallel-get-memory (+ localJ (* total_idx 5 3)) (+ ,J_thread (GET_FIELD_ELEMENT_ID_KERNEL (- Bidx 2) (+ iy Bidy -2) (+ iz Bidz -2) 0 0)) (* 3 5) get_sync_id)
+		       )
+		     )
+
+		     (for-from-zero-to i N_l
+		       (if (eq? i 0) ,(gen_pass_xyz 0 '(* 0.5 Deltat)))
+		       ,(gen_pass_xyz 1 '(* 0.5 Deltat))
+		       ,(gen_pass_xyz 2 '(* 1 Deltat))
+		       ,(gen_pass_xyz 1 '(* 0.5 Deltat))
+		       ,(gen_pass_xyz 0 '(* Deltat (if (eq? i (- N_l 1)) 0.5 1)))
+		       )
+		     )
+		   (incf! (vrf local_particle_head 0) 0.5)
+		   (incf! (vrf local_particle_head 1) 0.5)
+		   (incf! (vrf local_particle_head 2) 0.5)
+		   (sync-local)
+		   ;gpu will buggy here
+		   (if push_J
+		     (for-from-zero-to iz 5 
+		       (for-from-zero-to iy 5 
+			 (define-long total_idx (+ iy (* iz 5))) 
+			 (parallel-put-memory (+ ,J_thread (GET_FIELD_ELEMENT_ID_KERNEL (- Bidx 2) (+ iy Bidy -2) (+ iz Bidz -2) 0 0)) (+ localJ (* total_idx 5 3)) (* 3 5) put_sync_id)
+			 )
+		       )
+		   )
+		   (WAIT_SPARSE_MEMORY put_sync_id)
+		   ;(incf! (vrf a_rva g 3) allincfvx)
+		   ;(incf! (vrf a_rva g 4) allincfvy)
+		   ;(incf! (vrf a_rva g 5) allincfvz)
+
+		   )))
+	   )
+	'())
+      )
+    (begin-map
+      (lambda (name use-push-r)
+      (gen_push_kernel_nogrid name (append (cdr all_vars_0) '((int N_l) (int N_M) (int push_J)))
+	(lambda (x) (gen_passE_calc_nogrid x 'load0 'fieldE 'FoutJ 'fieldB #f use-push-r))
+	(lambda () '())
+	))
+      '(split_pass_xyzE_particle split_pass_xyzE_particle_push_r) '(#f #t)
+      )
+    )) 
+   
+

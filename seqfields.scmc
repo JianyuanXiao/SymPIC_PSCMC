@@ -1,0 +1,39 @@
+;paravec.scmc
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") (load "multi-array-pscmc.scmc") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(include< "assert.h")
+;(include- "c_/c_pscmc_inc.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include- "seqfields.h")
+(include< "stdio.h")
+
+
+(eval-scmc-global
+`(begin 
+   (defun-class-Field3D_Seq build_Field_compute_unit_from_seq_field int ((Field3D_Seq* input_E))
+     (define-int num_cu ,(choose_the_runtime_procedure 'blas_sum_get_num_compute_units '(blas_sum_get_num_compute_units NULL) `(structp-ref input_E CD_type)))
+     (define-int new_num_ele (* num_cu (structp-ref input_E num_ele)))
+     (fprintf stderr "newnumele=%d numcu=%d\n" new_num_ele num_cu)
+     (set! (vector-ref pthis 0) (vector-ref input_E 0))
+     (set! (structp-ref pthis num_ele) new_num_ele)
+     ;(alloc_Field3D_Seq_dmonly pthis 0)
+     (return 0)
+     )
+   (defun-class-Field3D_MPI build_Field_compute_unit_from_mpi_field int ((Field3D_MPI* input_E))
+     (set! (vector-ref pthis 0) (vector-ref input_E 0))
+     (set! (structp-ref pthis data) (TYPE_MALLOC Field3D_Seq (structp-ref input_E num_runtime)))
+     (for-from-to i 0 (structp-ref input_E num_runtime)
+       (build_Field_compute_unit_from_seq_field (+ pthis->data i) (+ input_E->data i))
+       )
+     )
+   )
+
+)
+
+
+

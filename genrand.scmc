@@ -1,0 +1,13 @@
+
+(include< "stdlib.h")
+(include< "math.h")
+(defun rand01 double ((double x0) (double x1))
+  (return (+ (/ (* (- x1 x0) (+ 0.5 (rand))) (+ (type-convert double RAND_MAX) 1.0)) x0))
+  )
+(defun maxwell_dist double ((double ava) (double sig))
+  (return (runc "sig*sqrt(-2.*log(rand01(0,1)))*cos(M_PI*2.*rand01(0,1))+ava"))
+  )
+(defun lost_cone_dist int ((double mu) (double mu0) (double delta))
+  (define r01 (rand01 0 1))
+  (if (> r01 (* 0.5 (runc "1-tanh((mu-mu0)/delta)"))) (return 0) (return 1))
+  )

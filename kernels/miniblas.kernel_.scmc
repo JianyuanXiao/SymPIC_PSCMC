@@ -1,0 +1,359 @@
+
+(input-scmc "../general_macros.scmc")
+(input-scmc "../gen_discrete_operators.scmc")
+(input-scmc "../simd_intrin_config.scmc")
+(input-scmc "../particle_macros.scmc")
+
+(input-include "local_header.h")
+;(include< "assert.h")
+(define-scmc-global gen-reduce-blas-core
+  (lambda (name-vars-body)
+    (multi-define name vars vec-vars body name-vars-body)
+    )
+  )
+(define-scmc-global field-shape-vars '((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock) (int num_ele)))
+(eval-scmc-global
+  `(defkernel blas_yiszero_synced ,(append '((double* y)) field-shape-vars)
+     (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+     (define-const-long LOCAL_CACHE_LEN 128)
+     (define-long local_ymin (* __idy local_ynum))
+     (define-long local_ymax (* (+ 1 __idy) local_ynum))
+     (define xb xblock)
+     (define yb yblock)
+     (define zb zblock)
+     (define-long blk_all_len (* xb yb zb num_ele))
+     (if (>= local_ymax numvec) (set! local_ymax numvec))
+     (dec-local_shared-array double zeros 128)
+     (define lg 0)
+     (for (set! lg 0) (< (+ lg __idx) LOCAL_CACHE_LEN) (incf! lg __xlen)
+       (vector-set! zeros (+ lg __idx) 0)
+       )
+     (INIT_ASYNC_IO_LOCK put_sync_id)
+
+     (for-from-to i local_ymin local_ymax 
+       (define-long blk_offset_t1 (* blk_all_len i))
+       ;(for (set! j 0) (< j LOCAL_CACHE_LEN))
+       ;(for-from-zero-to-cache-opt ((+ x blk_offset_t1) local_x double num_ele num_ele))
+       (define j 0)
+       (for (set! j 0) (< j blk_all_len) (incf! j LOCAL_CACHE_LEN)
+	 (define-int numcp (if (< (+ j LOCAL_CACHE_LEN) blk_all_len) LOCAL_CACHE_LEN (- blk_all_len j)))
+	 (parallel-put-memory (+ y blk_offset_t1 j) zeros numcp put_sync_id)
+	 )
+       )
+     (WAIT_SPARSE_MEMORY put_sync_id)
+     )
+  )
+(defkernel blas_mulxy_numele3 (eval-scmc-global (append '((double* y) (double* x)) field-shape-vars))
+  (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+  (define-long local_ymin (* __idy local_ynum))
+  (define-long local_ymax (* (+ 1 __idy) local_ynum))
+  (define xb xblock)
+  (define yb yblock)
+  (define zb zblock)
+  (define-long blk_all_len_0 (* xb yb zb num_ele))
+  (define-long blk_all_len_1 (* xb yb zb 3))
+  (if (>= local_ymax numvec) (set! local_ymax numvec))
+  (for-from-to i local_ymin local_ymax 
+    (define j 0)
+    (fffor_xyz_from_zero_to 1 YLEN ZLEN
+      (define-long blk_offset_0 (+ (* blk_all_len_0 i) (GET_IDXYZL ovlp (+ xyzy ovlp) (+ xyzz ovlp) 0 num_ele xb yb zb)))
+      (define-long blk_offset_1 (+ (* blk_all_len_1 i) (GET_IDXYZL ovlp (+ xyzy ovlp) (+ xyzz ovlp) 0 3 xb yb zb)))
+      (block
+	(define g 0)
+	(for g=0 (< (+ __idx (* g __xlen)) (* XLEN num_ele)) g++
+	  (define-long realidx (+ __idx (* g __xlen)))
+	  (define-int cur_id (remainder realidx num_ele))
+	  (define-int realidx_1 (+ cur_id (* 3 (/ realidx num_ele))))
+	  (if (< cur_id 3)
+	    (vector-set! y (+ blk_offset_0 realidx) (* (vector-ref y (+ blk_offset_0 realidx)) (vector-ref x (+ blk_offset_1 realidx_1))))
+	    )
+	  )
+	)
+      )
+    )
+  )
+(define-scmc-global gen-blas-core
+  (lambda (name-vars-body . isreduce)
+    (multi-define name vars vec-vars body name-vars-body)
+    (define vec_vars_lst 
+      (let loop ((vec-vars vec-vars))
+	(cond
+	  ((null? vec-vars) '())
+	  (else  (cons `(vector-ref ,(cadr (car vec-vars)) (+ blk_offset realidx)) (loop (cdr vec-vars)))))
+	)
+      )
+    ;(define vec_vars_lst_fast (let loop ((vec-vars vec-vars)) (cond ((null? vec-vars) '()) (else  (cons `(vector-ref ,(cadr (car vec-vars)) (+ blk_offset realidx)) (loop (cdr vec-vars)))))))
+    ;(write (list name vec_vars_lst) current-error-port) (newline current-error-port)
+    (define one_block_max_num_double (if (isinlst RUNTIME '(SWMC)) 2048 1))
+    (define fast_vec_name (map (lambda (x) (multi-concat 'fast_ (cadr x))) vec-vars))
+    (define fast_vec_lst (map (lambda (x) `(vector-ref ,x (+ (GET_IDXYZL ovlp (+ xyzy ovlp) (+ xyzz ovlp) 0 num_ele xb yb zb) realidx))) fast_vec_name))
+    (define fb_vec_lst (map (lambda (x) `(vector-ref (vector-ref ,x g) 0)) fast_vec_name))
+    (define rdcd_var (if (and (pair? isreduce) (eq? (car isreduce) 'm)) 'rdcd_max 'rdcd_sum))
+
+    (begin-map
+      (lambda (blk_lfx)
+	`(defkernel ,(multi-concat 'blas_ name blk_lfx) ,(append vec-vars (if (null? isreduce) '() `((double* ,rdcd_var))) vars field-shape-vars)
+	   (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+	   (define-long local_ymin (* __idy local_ynum))
+	   (define-long local_ymax (* (+ 1 __idy) local_ynum))
+	   (define xb xblock)
+	   (define yb yblock)
+	   (define zb zblock)
+	   (define-long blk_all_len (* xb yb zb num_ele))
+	   (if (>= local_ymax numvec) (set! local_ymax numvec))
+	   (dec-local_shared-array double reduce_tmp_arr IDX_OPT_MAX)
+	   (define reduce_tmp 0.0)
+	   (for-from-to i local_ymin local_ymax 
+	     ,(if (eq? blk_lfx "")
+		`(if (<= blk_all_len ,one_block_max_num_double)
+		   (begin
+		     ;(fprintf stderr "haha here\n")
+		     ,(begin-map 
+			(lambda (x)
+			  (define realname (cadr x))
+			  (define vecname (multi-concat 'fast_ realname))
+			  `(begin 
+			     (dec-array double ,vecname ,one_block_max_num_double)
+			     (GET_CONT_MEMORY ,vecname (+ ,realname (* i blk_all_len)) blk_all_len)
+			     )
+			  ) vec-vars)
+		     (fffor_xyz_from_zero_to 1 YLEN ZLEN
+		       (for-from-to realidx 0 (* num_ele XLEN)
+			 ,(if (null? isreduce)
+			    (apply body fast_vec_lst)
+			    (apply body (cons 'reduce_tmp fast_vec_lst))
+			    )
+			 )
+		       )
+		     ,(if (null? isreduce) 
+			`(PUT_CONT_MEMORY (+ ,(cadar vec-vars) (* i blk_all_len)) ,(car fast_vec_name) blk_all_len)
+			'())
+		     )
+		   (fffor_xyz_from_zero_to 1 YLEN ZLEN
+		     (define-long blk_offset_t1 (* blk_all_len i))
+		     (define-long blk_offset (+ (* blk_all_len i) (GET_IDXYZL ovlp (+ xyzy ovlp) (+ xyzz ovlp) 0 num_ele xb yb zb)))
+		     (block
+		       (define g 0)
+		       (for g=0 (< (+ __idx (* g __xlen)) (* XLEN num_ele)) g++
+			 (define-long realidx (+ __idx (* g __xlen)))
+			 ;(define l (remainder realidx 3))
+			 ;(define xidx (/ realidx 3))
+			 ;(set! realidx (+ (* (/ realidx 3) num_ele) l))
+			 ,(if (null? isreduce) 
+			    (apply body vec_vars_lst)
+			    (apply body (cons 'reduce_tmp vec_vars_lst))
+			    )
+			 )
+		       )
+		     ))
+		`(begin
+		   ,(for-from-zero-to-cache-opt-proc
+		      (begin 
+			(define ns -1)
+			(map 
+			  (lambda (x)
+			    (incf! ns)
+			    (define realname (cadr x))
+			    (define vecname (multi-concat 'fast_ realname))
+			    `((+ ,realname (* i blk_all_len)) ,vecname double 1 1 . ,(if (and (eq? ns 0) (null? isreduce)) '() '(0)))
+			    ) vec-vars)) one_block_max_num_double 'g 'blk_all_len
+		      (if (null? isreduce)
+			 (apply body fb_vec_lst)
+			 (apply body (cons 'reduce_tmp fb_vec_lst))
+			 )
+		      '()
+		      )
+		   )
+		)
+	     )
+	   ,(if (null? isreduce)
+	      `()
+	      `(begin
+		 (vector-set! reduce_tmp_arr __idx reduce_tmp)
+		 (sync-local)
+		 (if (eq? __idx 0)
+		   (begin
+		     (for-from-to i1 1 IDX_OPT_MAX
+		       ,(body 'reduce_tmp `(vector-ref reduce_tmp_arr i1) 1)
+		       )
+		     (vector-set! ,rdcd_var __idy reduce_tmp)))
+		 )
+	      )
+	   )) '("" "_full_block"))
+    )
+  )
+(define-scmc-global gen-blas-shrink/enlarge-no-aver
+  (lambda (name-vars-body)
+    (multi-define name vars vec-vars body name-vars-body)
+    (define ret-var (cadar vec-vars))
+    (define rst-vars (map cadr (cdr vec-vars)))
+    (define (gen-fast-vec-lst-proc s/e)
+      (lambda (x)
+	(cond
+	  ((eq? s/e 'shrink) 
+	    `(vector-ref ,x (+ (* blk_all_len i) (GET_IDXYZL (+ xyzx ovlp) (+ xyzy ovlp) (+ xyzz ovlp) realidx num_ele xb yb zb))))
+	  (else
+	    `(vector-ref ,x (+ (* blk_all_len_2x i) (GET_IDXYZL (+ ovlp (* 2 xyzx)) (+  (* 2 xyzy) ovlp) (+  (* 2 xyzz) ovlp) realidx num_ele xb_2x yb_2x zb_2x))) 
+	    )
+	  ))
+      )
+    (begin-map 
+      (lambda (s/e)
+	(define fast_vec_lst 
+	  (cons ((gen-fast-vec-lst-proc s/e) ret-var)
+	    (map 
+	      (lambda (x)
+		((gen-fast-vec-lst-proc (if (eq? s/e 'enlarge) 'shrink 'enlarge)) x)
+		) rst-vars)
+	    ))
+	;(write fast_vec_lst current-error-port) (newline current-error-port)
+	`(defkernel ,(multi-concat 'blas_ name '_ s/e) ,(append vec-vars vars field-shape-vars)
+	   (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+	   (define-long local_ymin (* __idy local_ynum))
+	   (define-long local_ymax (* (+ 1 __idy) local_ynum))
+	   (define xb xblock)
+	   (define yb yblock)
+	   (define zb zblock)
+	   (define-long blk_all_len (* xb yb zb num_ele))
+	   (define-long xb_2x (+ (* 2 ovlp) (xyzmax_ifn1x2 XLEN)))
+	   (define-long yb_2x (+ (* 2 ovlp) (xyzmax_ifn1x2 YLEN)))
+	   (define-long zb_2x (+ (* 2 ovlp) (xyzmax_ifn1x2 ZLEN)))
+	   (define-long blk_all_len_2x (* xb_2x yb_2x zb_2x num_ele))
+	   ;(assert (== (* (+ ovlp XLEN) 2) (- (* xb 2) (* ovlp 2))))
+	   (for-from-to i local_ymin local_ymax
+	     (fffor_xyz_from_zero_to XLEN YLEN ZLEN
+	       ;(LOG_RECORD_INFO "%d\n" (GET_IDXYZL (+ ovlp (* xyzx 2)) (+ (* xyzy 2) ovlp) (+ (* 2 xyzz) ovlp) 0 num_ele (- (* xb 2) (* 2 ovlp)) (- (* 2 yb) (* 2 ovlp)) (- (* 2 zb) (* 2 ovlp))))
+	       (for-from-to realidx 0  num_ele 
+		 ,(apply body fast_vec_lst)
+		 )
+	       )
+	     )
+	   )
+	) '(shrink enlarge))
+    ))
+(define-scmc-global gen-blas-shrink/enlarge 
+  (lambda (name-vars-body)
+    (multi-define name vars vec-vars body name-vars-body)
+    (define ret-var (cadar vec-vars))
+    (define rst-vars (map cadr (cdr vec-vars)))
+    (define (gen-fast-vec-lst-proc s/e isl?)
+      (lambda (x)
+	;(define isl? #t)
+	;(define s/e-expr)
+	  (if isl?
+	    (cond
+	      ((eq? s/e 'shrink) 
+		`(vector-ref ,x (+ (* blk_all_len i) (GET_IDXYZL (+ xyzx ovlp) (+ xyzy ovlp) (+ xyzz ovlp) realidx num_ele xb yb zb))))
+	      (else
+		`(vector-ref ,x (+ (* blk_all_len_2x i) (GET_IDXYZL (+ ovlp (* 2 xyzx) (if (== XLEN 1) 0 gx)) (+ (* 2 xyzy) ovlp (if (== YLEN 1) 0 gy)) (+ (* 2 xyzz) (if (== ZLEN 1) 0 gz) ovlp) realidx num_ele xb_2x yb_2x zb_2x)))
+		)
+	      )
+	    (cond
+	      ((eq? s/e 'shrink)
+		`(* 0.125 (vector-ref ,x (+ (* blk_all_len i) (GET_IDXYZL (+ xyzx ovlp) (+ xyzy ovlp) (+ xyzz ovlp) realidx num_ele xb yb zb))))
+		)
+	      (else
+		`(block 
+		   (define-double ret 0)
+		   (inner-for-from-to gz 0 2
+		     (inner-for-from-to gy 0 2
+		       (inner-for-from-to gx 0 2
+			 (incf! ret (* 0.125 (vector-ref ,x (+ (* blk_all_len_2x i) (GET_IDXYZL (+ ovlp (* 2 xyzx) (if (== XLEN 1) 0 gx)) (+  (* 2 xyzy) ovlp  (if (== YLEN 1) 0 gy)) (+  (* 2 xyzz) (if (== ZLEN 1) 0 gz) ovlp) realidx num_ele xb_2x yb_2x zb_2x)))))
+			 )
+		       ) 
+		     )
+		   ret
+		   )
+		)
+	      )
+	    )
+	  
+	)
+      )
+    (begin-map 
+      (lambda (s/e)
+	(define fast_vec_lst 
+	  (cons ((gen-fast-vec-lst-proc s/e #t) ret-var)
+	    (map 
+	      (lambda (x)
+		((gen-fast-vec-lst-proc (if (eq? s/e 'enlarge) 'shrink 'enlarge) #f) x)
+		) rst-vars)
+	    ))
+	(define is-s (eq? s/e 'shrink))
+	;(write fast_vec_lst current-error-port) (newline current-error-port)
+	`(defkernel ,(multi-concat 'blas_ name '_ s/e) ,(append vec-vars vars field-shape-vars)
+	   (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+	   (define-long local_ymin (* __idy local_ynum))
+	   (define-long local_ymax (* (+ 1 __idy) local_ynum))
+	   (define xb xblock)
+	   (define yb yblock)
+	   (define zb zblock)
+	   (define-long blk_all_len (* xb yb zb num_ele))
+	   (define-long xb_2x (+ (* 2 ovlp) (xyzmax_ifn1x2 XLEN)))
+	   (define-long yb_2x (+ (* 2 ovlp) (xyzmax_ifn1x2 YLEN)))
+	   (define-long zb_2x (+ (* 2 ovlp) (xyzmax_ifn1x2 ZLEN)))
+	   (define-long blk_all_len_2x (* xb_2x yb_2x zb_2x num_ele))
+	   ;(assert (== (* (+ ovlp XLEN) 2) (- (* xb 2) (* ovlp 2))))
+	   (for-from-to i local_ymin local_ymax
+	     (fffor_xyz_from_zero_to XLEN YLEN ZLEN
+	       ;(LOG_RECORD_INFO "%d\n" (GET_IDXYZL (+ ovlp (* xyzx 2)) (+ (* xyzy 2) ovlp) (+ (* 2 xyzz) ovlp) 0 num_ele (- (* xb 2) (* 2 ovlp)) (- (* 2 yb) (* 2 ovlp)) (- (* 2 zb) (* 2 ovlp))))
+
+	       (for-from-to realidx 0 num_ele
+		 ,(if is-s
+		    (apply body fast_vec_lst)
+		    `(inner-for-from-to gz 0 2
+		       (inner-for-from-to gy 0 2
+			 (inner-for-from-to gx 0 2
+			   ,(apply body fast_vec_lst)
+			   )
+			 )
+		       )))
+	       )
+	     )
+	   )
+	) '(shrink enlarge))
+    ))
+(eval-scmc-global 
+  (list 'begin 
+    (if #t
+      (begin-map gen-blas-core 
+      `(
+	 (yiszero () ((double* y)) ,(lambda (y) `(set! ,y 0)))
+	 (yisconst ((double a)) ((double* y)) ,(lambda (y) `(set! ,y a)))
+	 (get_ITG_Potential ((double minus_over_q_e)) ((double* y) (double* x) (double* u)) ,(lambda (y x u) `(if (and (> ,y 0) (> ,u 0)) (set! ,y (* minus_over_q_e ,x (log (/ ,y ,u)))) (set! ,y 0)))); y is Phi_I or n_i , x is -T_e, u is n e0
+	 ;(get_ITG_Potential ((double minus_over_q_e)) ((double* y) (double* x) (double* u)) ,(lambda (y x u) `(if 1 (set! ,y (* minus_over_q_e ,x (* ,y 1)))))); y is n_i/phi_I , x is -T_e, u is n_e0
+	 (invy () ((double* y)) ,(lambda (y) `(if (neq? ,y 0)  (set! ,y (/ 1. ,y)))))
+	 (yisax ((double a)) ((double* y) (double* x)) ,(lambda (y x) `(set! ,y (* a ,x))))
+	 (axpy ((double a)) ((double* y) (double* x)) ,(lambda (y x) `(incf! ,y (* a ,x))))
+	 (axpby ((double a) (double b)) ((double* y) (double* x)) ,(lambda (y x) `(set! ,y (+ (* a ,x) (* b ,y)))))
+	 (mulxy () ((double* y) (double* x)) ,(lambda (y x) `(set! ,y (* ,x ,y))))
+	 )
+      ) '())
+    (begin-map
+      (lambda (x)
+	(gen-blas-core x 'm)
+	)
+      `(
+	 (findmax () ((double* y)) ,(lambda (r y) `(set! ,r (if (> (fabs ,y) ,r) (fabs ,y) ,r))))
+	 )
+      )
+    (begin-map 
+      (lambda (x)
+	(gen-blas-core x #t)
+	)
+      `(
+	 (dot () ((double* y) (double* x)) ,(lambda (r y x) `(incf! ,r (* ,x ,y))))
+	 (sum () ((double* y)) ,(lambda (r y) `(incf! ,r ,y)))
+	 )
+      )
+    (begin-map gen-blas-shrink/enlarge 
+      `(
+	 (yisax ((double a)) ((double* y) (double* x)) ,(lambda (y x) `(set! ,y (* a ,x))))
+	 (axpy ((double a)) ((double* y) (double* x)) ,(lambda (y x) `(incf! ,y (* a ,x))))
+	 (axpby ((double a) (double b)) ((double* y) (double* x)) ,(lambda (y x) `(set! ,y (+ (* a ,x) (* b ,y))))))
+      )
+    '()
+    )
+  )
+
+

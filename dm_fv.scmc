@@ -1,0 +1,27 @@
+(define-scmc-global dm_fv_vars `(Q M DT DM_A DX DY DZ))
+(typedef-struct dm_fv
+  (Field3D_MPI* pA0)
+  (Field3D_MPI* pA1)
+  (Field3D_MPI* pA2)
+  (Field3D_MPI* pF0)
+
+  (double Q)
+  (double M)
+  (double DT)
+  (double DM_A)
+
+  (double DX)
+  (double DY)
+  (double DZ)
+  )
+(typedef-struct hydro_fv
+  (Field3D_MPI* palpha_beta1)
+  (Field3D_MPI* prho_s_vx)
+  (Field3D_MPI* pvA1)
+  (double dt)
+  (double dx)
+  (double dy)
+  (double dz)
+  (double u0)
+  (double qm0)
+  )

@@ -1,0 +1,98 @@
+
+(input-include "local_header.h")
+(input-scmc "../general_macros.scmc")
+(input-scmc "../gen_discrete_operators.scmc")
+(eval-scmc-global 
+  (begin (load "../hdvsischeme.ss")
+    (load "../multi-map.ss")
+    (define (gen_hydro_core_funs name output corefun)
+    `(defkernel ,name ,(cons output '((double* alpha_beta_new) (double* alpha_beta) (double* rho_s_vx) (double* vA) (double* vAzero) (long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock) (int num_ele) (int num_ele_rho_s_vx) (int num_ele_vA) (int num_ele_alpha_beta) (double QM0) (double U0) (double DX) (double DY) (double DZ) (double DT)))
+       (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+       (define-long local_ymin (* __idy local_ynum))
+       (define-long local_ymax (* (+ 1 __idy) local_ynum))
+       (if (>= local_ymax numvec) (set! local_ymax numvec))
+       (define-long blk_all_len_nonele (* xblock yblock zblock))
+
+       (for-from-to i local_ymin local_ymax 
+	 (define allmax (* XLEN YLEN ZLEN))
+	 (define-long g 0)
+	 (for (set! g 0) (< g allmax) (incf! g __xlen)
+	   (define-long xyzx (remainder g XLEN))
+	   (define-long xyzy (remainder (/ g XLEN) YLEN))
+	   (define-long xyzz (/ g (* XLEN YLEN)))
+	   (define-long blk_offset_ne (* blk_all_len_nonele i num_ele))
+	   (define-long blk_offset_alpha_beta (* blk_all_len_nonele i num_ele_alpha_beta))
+	   (define-long blk_offset_rho_s_vx (* blk_all_len_nonele i num_ele_rho_s_vx))
+	   (define-long blk_offset_vA (* blk_all_len_nonele i num_ele_vA))
+	   ,(corefun)
+	   )
+	 )
+       ))
+    (define (gen012_hydro name output offset numele_offset numout t . useA0)
+      (if (null? useA0) (set! useA0 #f) (set! useA0 (car useA0)))
+      (gen_hydro_core_funs name output 
+	(lambda ()
+	  `(begin
+	     (begin . 
+	       ,(multi-map 
+		  (lambda ijk
+		    (multi-define i j k ijk)
+		    (define the-lst (map (lambda (x) (number->string x)) ijk))
+		    (define n -1)
+		    (define (gen_cursym ch t . xyz) 
+		      ;(write ret current-error-port)
+		      (apply multi-concat (lcons ch t (append xyz the-lst )))
+		      )
+
+		    `(begin
+		       ,(begin-map
+			 (lambda (x xyz)
+			   (incf! n)
+			   `(begin 
+			      (define-double ,(gen_cursym x t xyz) (vrf (+ rho_s_vx blk_offset_rho_s_vx) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,n num_ele_rho_s_vx)))
+			      ,(if (> n 1)
+				 `(begin 
+				    (define-double ,(gen_cursym 'VA t xyz) (vrf (+ vA blk_offset_vA) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,(- n 2) num_ele_vA)))
+				    ,(if useA0
+				       `(define-double ,(gen_cursym 'VA "0" xyz) (vrf (+ vAzero blk_offset_vA) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) ,(- n 2) num_ele_vA)))
+				       '()
+				       )
+				    )
+				 '()
+				 )
+			      )
+			   )
+			 '(RHO S VX VX VX) '("" "" "X" "Y" "Z")
+			 )
+		       (define-double ,(gen_cursym 'ALPHA t "") (vrf (+ alpha_beta blk_offset_alpha_beta) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) 0 num_ele_alpha_beta)))
+		       (define-double ,(gen_cursym 'BETA t "") (vrf (+ alpha_beta blk_offset_alpha_beta) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) 1 num_ele_alpha_beta)))
+		       (define-double ,(gen_cursym 'ALPHA_NEW t "") (vrf (+ alpha_beta_new blk_offset_alpha_beta) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) 0 num_ele_alpha_beta)))
+		       (define-double ,(gen_cursym 'BETA_NEW t "") (vrf (+ alpha_beta_new blk_offset_alpha_beta) (GET_IDXYZLO2 (+ ,k xyzx -1) (+ ,j xyzy -1) (+ ,i xyzz -1) 1 num_ele_alpha_beta)))
+		       )
+		    ) '(0 1 2) '(0 1 2) '(0 1 2)))
+	     (begin . 
+	       ,(let loop ((n 0))
+		  (if (< n numout)
+		    (begin 
+		      (define cur_out 
+			`(begin 
+			   (set! (vrf (+ ,(cadr output) blk_offset_ne) (GET_IDXYZLO2 xyzx xyzy xyzz (+ ,n ,numele_offset) num_ele)) ,(eval (list (multi-concat 'fl (number->string (+ n offset))) 0)))
+			   ;(fprintf stderr ,(multi-concat "" name " output=%e xyzr=%d %d %d alpn111=%e beta111=%e\n") (vrf (+ ,(cadr output) blk_offset_ne) (GET_IDXYZLO2 xyzx xyzy xyzz (+ ,n ,numele_offset) num_ele)) xyzx xyzy xyzz ,(multi-concat 'ALPHA_NEW t "111") ,(multi-concat 'BETA_NEW t "111"))
+			   ))
+		      (cons cur_out (loop (+ n 1)) ))
+		    '()
+		    )
+		  )
+	       )
+	     )
+	  )
+	)
+      )
+    `(begin
+       ,(gen012_hydro 'hydro_push_rho_s '(double* out_rho_s_vx) 0 0 2 "0")
+       ,(gen012_hydro 'hydro_push_vx '(double* out_rho_s_vx) 2 2 3 "1")
+       ,(gen012_hydro 'hydro_push_alpha_beta '(double* out_alpha_beta) 5 0 2 "1")
+       ,(gen012_hydro 'hydro_push_jac_alpha_beta '(double* out_alpha_beta) 7 0 2 "1")
+       ,(gen012_hydro 'hydro_push_vA '(double* out_vA) 9 0 3 "1" #t)
+       )
+    ))

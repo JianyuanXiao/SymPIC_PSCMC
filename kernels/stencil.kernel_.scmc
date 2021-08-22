@@ -1,0 +1,86 @@
+
+(input-include "local_header.h")
+(input-scmc "../general_macros.scmc")
+(input-scmc "../gen_discrete_operators.scmc")
+(define-scmc-global gen-filter-core 
+  (lambda (name level core_fun)
+    `(defkernel ,(multi-concat 'Yee_FDTD_ name (multi-concat '_ (number->string level))) ,yee-header-procs  
+       (define i 0)
+       ;(define-long rem (remainder numvec __ylen))
+       (define-long local_ynum (runc "(numvec-1)/y_cpu_core+1"))
+       (define-long local_ymin (* __idy local_ynum))
+       (define-long local_ymax (* (+ 1 __idy) local_ynum))
+       (define xb xblock)
+       (define yb yblock)
+       (define zb zblock)
+       (define-long blk_all_len (* xb yb zb num_ele))
+       (if (>= local_ymax numvec) (set! local_ymax numvec))
+       (for (set! i local_ymin) (< i local_ymax) i++
+	 (define j 0)
+	 (fffor_xyz_from_zero_to 1 YLEN ZLEN
+	   (define-long blk_offset_t1 (* blk_all_len i))
+	   (define-long blk_offset (+ (* blk_all_len i) (GET_IDXYZL ovlp (+ xyzy ovlp) (+ xyzz ovlp) 0 num_ele xb yb zb)))
+	   (block
+	     (define g 0)
+	     (for g=0 (< (+ __idx (* g __xlen)) (* XLEN 3)) g++
+	       (define-long realidx (+ __idx (* g __xlen)))
+	       (define l (remainder realidx 3))
+	       (define xidx (/ realidx 3))
+	       (set! realidx (+ (* (/ realidx 3) num_ele) l))
+	       ,(core_fun `(vector-ref outEB (+ blk_offset realidx)) `(+ inEB blk_offset_t1) 'xidx  'xyzy 'xyzz)
+	       )
+	     )
+	   )
+	 )
+       )
+    )
+  )
+(eval-scmc-global 
+  (begin-map 
+    (lambda (level)
+      (gen-filter-core 'W04 level
+	(lambda (out in ix iy iz)
+	  (define (W04_filter dir in-proc)
+	    (lambda (ix iy iz)
+	      (define (sten-add1 offset)
+		(case dir
+		  (0 (in-proc `(+ ,offset ,ix) iy iz))
+		  (1 (in-proc ix `(+ ,offset ,iy) iz))
+		  (2 (in-proc ix iy `(+ ,offset ,iz)))
+		  (else (in-proc ix iy iz))
+		  )
+		)
+	      `(+ (* ,(/ 13 12) ,(sten-add1 0)) (* ,(/ -1 24) ,(sten-add1 1)) (* ,(/ -1 24) ,(sten-add1 -1)))
+	      )
+	    )
+	  (define inner-ident-proc 
+	    (lambda (in)
+	      (lambda (ix iy iz) 
+		`(vector-ref ,in (GET_IDXYZLO ,ix ,iy ,iz l))
+		)))
+	  (case level
+	    (0 
+	      `(set! ,out
+		 ,((W04_filter 0 
+		    (W04_filter 1 
+		      (W04_filter 2 (inner-ident-proc in)))) ix iy iz))
+	      )
+	    (1 
+	      `(set! ,out 
+		 (cond
+		   ((eq? l 0) ,((W04_filter 1 (W04_filter 2 (inner-ident-proc in))) ix iy iz))
+		   ((eq? l 1) ,((W04_filter 2 (W04_filter 0 (inner-ident-proc in))) ix iy iz))
+		   ((eq? l 2) ,((W04_filter 0 (W04_filter 1 (inner-ident-proc in))) ix iy iz))
+		   ))
+	      )
+	    (2 
+	      `(set! ,out 
+		 (cond
+		   ((eq? l 0) ,((W04_filter 0 (inner-ident-proc in)) ix iy iz))
+		   ((eq? l 1) ,((W04_filter 1 (inner-ident-proc in)) ix iy iz))
+		   ((eq? l 2) ,((W04_filter 2 (inner-ident-proc in)) ix iy iz))
+		   ))
+	      )
+	    )
+	  )
+	)) '(0 1 2)))

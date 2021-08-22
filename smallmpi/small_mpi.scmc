@@ -1,0 +1,44 @@
+
+(include< "stdio.h")
+;(include< "mpi.h")
+(input-scmc "small_mpi_inc.scmc")
+;(input-scmc "mpi_fun_proto.scmc")
+
+
+(define-scmc-global gen-mpi-type 
+  (lambda (tp)
+    (if (isinlst tp MPI_GLOBAL_TYPES)
+      (multi-concat PS_MPI_PREFIX tp)
+      tp
+      )
+    ))
+(eval-scmc-global
+  (append '(begin)
+    (map
+      (lambda (fun)
+	(define funtype (car fun))
+	(define funname (cadr fun))
+	(define funargs (caddr fun))
+	(define new-funname (multi-concat PS_MPI_PREFIX funname))
+	(set! funargs (map gen-mpi-type funargs))
+	(define funargs-notype (map cadr funargs))
+	(define mid_stat 
+	  (if (isinlst 'status funargs-notype) 
+	    '(begin
+	       (define-PS_MPI_Status s0)
+	       (if (not status)
+		 (set! status ("&" s0))
+		 )
+	       ) '()))
+
+	`(defun ,new-funname ,funtype ,funargs
+	   ;(fprintf stderr ,(multi-concat "fun " new-funname " begin\n"))
+	   ,mid_stat
+	   ;(fprintf stderr ,(multi-concat "fun " new-funname " called\n"))
+	   (return (,funname . ,funargs-notype))
+	   )
+	)
+      MPI_FUN_PROTO
+      )
+    )
+  )

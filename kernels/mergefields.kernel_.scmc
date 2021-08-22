@@ -1,0 +1,156 @@
+
+(input-scmc "../general_macros.scmc")
+(input-include "local_header.h")
+(input-scmc "../gen_discrete_operators.scmc")
+(eval-scmc-global (begin (load "../kgmscheme.ss") '()))
+(defmacro getxyz (glid)
+  `(begin 
+     (define-long xyzx (remainder ,glid xb))
+     (define-long xyzy (remainder (/ ,glid xb) yb))
+     (define-long xyzz (/ ,glid (* xb yb)))
+     )
+  )
+(defkernel yee_local ((double* inout) (long numvec) (int num_ele) (long xblock) (long yblock) (long zblock) (int ovlp))
+  (define xb xblock)
+  (define yb yblock)
+  (define zb zblock)
+	(getxyz __idx)
+  ;(vector-set! in __global_idx (vector-ref out __global_idx))
+  )
+(define-scmc-global idxvars `((long numvec) (int num_ele) (long xblock) (long yblock) (long zblock) (int ovlp)))
+(defmacro gensyncs (name o2m_mode)
+  `(begin 
+     (defkernel ,name ,(append `((double* vecmain) (double* vecovlp) (int ovlpindex)) idxvars)
+     ,(gensyncs-proc name o2m_mode)
+     )
+     (defkernel ,(concat name '_all_in_one) ,(append `((double* vecmain) (double* vecovlps)) idxvars)
+       (define-size_t v_offset 0)
+       (inner-for-from-to ovlpindex 0 27
+	 (if (eq? ovlpindex 13) continue
+	   (begin
+	     (define-double* vecovlp (+ vecovlps v_offset))
+	     ,(gensyncs-proc name o2m_mode)
+	     (incf! v_offset (* ovlpalllen numvec))
+	     )
+	   )
+	 )
+       )
+     (defkernel ,(concat name '_once) 
+       ,(append '((double* vecmain))
+	  (let loop ((n 0))
+	    (cond
+	      ((eq? n 27) '())
+	      ((eq? n 13) (loop (+ n 1)))
+	      (else
+		(cons `(double* ,(concat 'vecovlp (number->string n)))
+		  (loop (+ n 1)))
+		)
+	      )
+	    ) 
+	  '((long numvec) (int num_ele) (long xblock) (long yblock) (long zblock) (int ovlp)))
+       (dec-array double* vecovlps 27)
+       ,(begin-map-n
+	  (lambda (n x)
+	    `(vector-set! vecovlps ,n ,(if (eq? n 13) 'NULL (concat 'vecovlp (number->string n))))
+	    ) 
+	  (vector->list (make-vector 27 0)))
+       (inner-for-from-to ovlpindex 0 27
+	 (if (eq? ovlpindex 13) continue
+	   (begin
+	     (define-double* vecovlp (vector-ref vecovlps ovlpindex))
+	     ,(gensyncs-proc name o2m_mode))
+	   )
+
+	 )
+       )
+     )
+  )
+(define-scmc-global gensyncs-proc 
+  (lambda (name o2m_mode)
+    (define ovlpele `(vector-ref vecovlp (+ (* i ovlpalllen) (GET_IDXYZL xyzx xyzy xyzz realidx num_ele ovlpxma ovlpyma ovlpzma))))
+    (define mainele `(vector-ref vecmain (+ (* i blk_all_len) (GET_IDXYZL lxyzx lxyzy lxyzz realidx num_ele xb yb zb))))
+    (define the_inner_offset 0)
+    (define ismainoff (if (isinlst o2m_mode '(m2o o2ma)) 1 0))
+    (define lastexpr 
+      (case o2m_mode
+	('o2m
+	  `(set! ,mainele ,ovlpele)
+	  )
+	('m2o 
+	  (set! the_inner_offset 'ovlp)
+	  `(set! ,ovlpele ,mainele)
+	  )
+	('o2ma
+	  (set! the_inner_offset 'ovlp)
+	  `(set! ,mainele (+ ,mainele ,ovlpele))
+	  )
+	('m2oa
+	  ;`(set! ,ovlpele (+ ,ovlpele ,mainele))
+	  `(set! ,ovlpele ,mainele)
+	  )
+	))
+    `(begin
+       (define i 0)
+       ;(define-long rem (remainder numvec __ylen))
+       (define-long local_ynum (runc "(numvec-1)/__ylen+1"))
+       (define-long local_ymin (* __idy local_ynum))
+       (define-long local_ymax (* (+ 1 __idy) local_ynum))
+       (define xb xblock)
+       (define yb yblock)
+       (define zb zblock)
+       (define-long blk_all_len (* xb yb zb num_ele))
+       (if (>= local_ymax numvec) (set! local_ymax numvec))
+
+       (define-int xlo (remainder ovlpindex 3))
+       (define-int ylo (remainder (/ ovlpindex 3) 3))
+       (define-int zlo (/ (/ ovlpindex 3) 3))
+       (define field_xmi ovlp)
+       (define field_ymi ovlp)
+       (define field_zmi ovlp)
+       (define-long field_xma (- xb ovlp))
+       (define-long field_yma (- yb ovlp))
+       (define-long field_zma (- zb ovlp))
+       (cond 
+	 ((== xlo 0) (set! field_xmi ,the_inner_offset) (set! field_xma (+ ovlp ,the_inner_offset)))
+	 ((== xlo 2) (set! field_xmi (- xb (+ ovlp ,the_inner_offset))) (set! field_xma (- xb ,the_inner_offset)))
+	 (else 0)
+	 )
+       (cond 
+	 ((== ylo 0) (set! field_ymi ,the_inner_offset) (set! field_yma (+ ovlp ,the_inner_offset)))
+	 ((== ylo 2) (set! field_ymi (- yb (+ ovlp ,the_inner_offset))) (set! field_yma (- yb ,the_inner_offset)))
+	 (else 0)
+	 )
+       (cond 
+	 ((== zlo 0) (set! field_zmi ,the_inner_offset) (set! field_zma (+ ovlp ,the_inner_offset)))
+	 ((== zlo 2) (set! field_zmi (- zb (+ ovlp ,the_inner_offset))) (set! field_zma (- zb ,the_inner_offset)))
+	 (else 0)
+	 )
+       (define-long ovlpxma (- field_xma field_xmi))
+       (define-long ovlpyma (- field_yma field_ymi))
+       (define-long ovlpzma (- field_zma field_zmi))
+       (define-long ovlpalllen (* ovlpxma ovlpyma ovlpzma num_ele))
+       (for (set! i local_ymin) (< i local_ymax) i++
+	 (fffor_xyz_from_zero_to ovlpxma ovlpyma ovlpzma
+	   (define-long lxyzx (+ xyzx field_xmi))
+	   (define-long lxyzy (+ xyzy field_ymi))
+	   (define-long lxyzz (+ xyzz field_zmi))
+	   (if ,ismainoff
+	     (begin 
+	       (if (or (< lxyzx ovlp) (>= lxyzx (- xb ovlp))) (set! lxyzx ovlp))
+	       (if (or (< lxyzy ovlp) (>= lxyzy (- yb ovlp))) (set! lxyzy ovlp))
+	       (if (or (< lxyzz ovlp) (>= lxyzz (- zb ovlp))) (set! lxyzz ovlp))))
+	   (block
+	     (define g 0)
+	     (for g=0 (< (+ __idx (* g __xlen)) num_ele) g++
+	       (define-long realidx (+ __idx (* g __xlen)))
+	       ,lastexpr 
+	       )
+	     )
+	   )
+	 )
+       )))
+(gensyncs sync_ovlp_o2m o2m)
+(gensyncs sync_ovlp_m2o m2o)
+(gensyncs merge_ovlp_o2m o2ma)
+(gensyncs merge_ovlp_m2o m2oa)
+

@@ -1,0 +1,312 @@
+
+(define (find-intBs expr)
+  (define (get-intBname expr)
+    (apply multi-concat expr)
+    )
+  (define iBs '())
+  (define modified-expr 
+    (let loop ((expr expr))
+      (cond
+	((not (pair? expr)) expr)
+	((and (symbol? (car expr))
+	   (let ((vsexpr (list->vector (string->list (symbol->string (car expr))))))
+	     (and (> (vector-length vsexpr) 7) (eq? (vector-ref vsexpr 0) #\B)
+	       (isinlst (vector-ref vsexpr 1) '(#\0 #\1 #\2))
+	       (isinlst (vector-ref vsexpr 2) '(#\x #\y #\z))
+	       (eq? (vector-ref vsexpr 3) #\_)
+	       (eq? (vector-ref vsexpr 4) #\i)
+	       ) 
+	     )
+	   )
+	  (set! iBs (cons expr iBs))
+	  (get-intBname expr)
+	  )
+	(else 
+	  (cons (loop (car expr)) (loop (cdr expr)))
+	  )
+	)
+      ))
+  (list iBs modified-expr)
+  )
+(define (merge-multi-setBs! Bexprs)
+  (define allm1 '())
+  (define allst1 '())
+  (define allfin1 '())
+  (let loop ((Bexprs Bexprs) (num 0))
+    (cond
+    ((null? Bexprs) '())
+    (else
+      (define newsumvar (concat 'sum (number->string num)))
+      (define s1 (car Bexprs))
+      (define m1 (cadr s1))
+      (define st1 (cadddr (cddr (caddr s1))))
+      (define fin1 (cadddr s1))
+      ;(set-car! (cadr m1) newsumvar)
+      ;(set-car! (cdr st1) newsumvar)
+      ;(set-car! (cddr fin1) newsumvar)
+      (set! allm1 (cons (replace-all m1 'sum0 newsumvar) allm1))
+      (set! allst1 (cons (replace-all st1 'sum0 newsumvar) allst1))
+      (set! allfin1 (cons (replace-all fin1 'sum0 newsumvar) allfin1))
+      (loop (cdr Bexprs) (+ num 1))
+      ))
+    )
+  (define Bret (replace-all (car Bexprs) 'kaksdasjdqeiad 'kaksdasjdqeiad))
+  (set-car! (cdr Bret) (cons 'begin allm1))
+  (set-car! (cdddr (cddr (caddr Bret))) (cons 'begin allst1))
+  (set-car! (cdddr Bret) (cons 'begin allfin1))
+  Bret
+  )
+(define (multi-remove-block-return-set! setvars exprs) 0
+  (define ibsrsts (map find-intBs exprs))
+  (define miBs (apply append (map car ibsrsts)))
+  (cond
+    ((null? miBs) (begin-map (lambda (x y) `(set! ,x ,y)) setvars exprs))
+    (else
+      (define mrsts (map cadr ibsrsts))
+      (define miBsS
+	(map 
+	  (lambda (x)
+	    (macroexpand (cons (concat (car x) '_precalc) (append (cdr x) (list (apply multi-concat x)))))
+	    ) miBs))
+      `(block
+	 ,(begin-map (lambda (x) `(define-double ,(apply multi-concat x))) miBs)
+	 ,(merge-multi-setBs! miBsS)
+	 ,(begin-map
+	    (lambda (x y)
+	      `(set! ,x ,y)
+	      ) setvars mrsts
+	    )
+	 )))
+  ;mrsts
+  )
+(define (remove-block-return-set! setvar expr)
+  (multi-define iBs rst (find-intBs expr))
+  (cond 
+    ((null? iBs) 
+      ;(write (list setvar expr) current-error-port) (newline current-error-port)
+      `(force-simd-ver (set! ,setvar ,expr)))
+    (else
+      `(block
+	 ,(begin-map 
+	    (lambda (x)
+	      (define funname (car x))
+	      (define args (cdr x))
+	      (define tmparg (apply multi-concat x))
+	      `(begin
+		 (define-double ,tmparg)
+		 ,(cons (multi-concat funname '_precalc) (append args (list tmparg)))
+		 ;(fprintf stderr ,(multi-concat "" tmparg "=%e\n") ,tmparg)
+		 )
+	      )
+	    iBs
+	    )
+	 (force-simd-ver
+	 (set! ,setvar ,rst))
+	 )
+      )
+    )
+  )
+(define (gen_intB-proc B0 xyz_num int_dir . use_proc_cal)
+  (define upc (if (null? use_proc_cal) #f (car use_proc_cal)))
+  (define xyz-vec (list->vector '(x y z x y z)))
+  (define XYZ-vec (list->vector '(X Y Z x y z)))
+  (define xyz (vector-ref xyz-vec xyz_num))
+  (define xyz_int (vector-ref xyz-vec int_dir ))
+  (define XYZ_int (vector-ref XYZ-vec int_dir ))
+  (define xyz-all '(x y z))
+  (define xyz-res (car (remove xyz_int (remove xyz xyz-all))))
+  (define lstfix (if upc '_pc '_precalc))
+  (define sec_para 
+    (list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f1_ xyz-res)) ,xyz-res))
+    )
+  (define trd_para
+    (list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f0_ xyz)) ,xyz))
+    )
+  (define use_swap_23_para_B (eq? (remainder (+ 3 (- xyz_num int_dir )) 3) 1))
+  (define use_swap_23_para_E (eq? (remainder (+ 3 (- xyz_num int_dir )) 3) 2))
+  (define sec_para_B (if use_swap_23_para_B trd_para sec_para))
+  (define trd_para_B (if use_swap_23_para_B sec_para trd_para))
+  (define sec_para_E (if use_swap_23_para_E trd_para sec_para))
+  (define trd_para_E (if use_swap_23_para_E sec_para trd_para))
+  (list 'begin
+    `(defmacro ,(multi-concat B0 xyz '_int xyz_int lstfix) (x y z xyzp vB0)
+       (set! x (list->string (list (cadr (string->list (symbol->string x))))))
+       (set! y (list->string (list (cadr (string->list (symbol->string y))))))
+       (set! z (list->string (list (cadr (string->list (symbol->string z))))))
+       (set! xyzp (list->string (list (cadr (string->list (symbol->string xyzp))))))
+
+       ,(list 'quasiquote 
+	  (if upc
+	    `(set! ,(list 'unquote 'vB0) 
+	       (get_B1_local_opt ,(multi-concat 'sh B0)
+		 ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'if1_ xyz_int)) ,xyz_int))
+		 ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'if1_ xyz_int)) xyzp))
+		 ;,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f1_ xyz-res)) ,xyz-res))
+		 ;,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f0_ xyz)) ,xyz))
+		 ,sec_para_B
+		 ,trd_para_B
+		 ,int_dir
+		 ,xyz_num))
+	    `(block
+	       (declare-double (sum0 0.0))
+	       (fffor-xyz-from-zero-to 5 5 5
+		 (declare-scalar-int (allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz))))))
+		 (force-simd-ver
+		   (incf! sum0 
+		     (* (vrf ,(multi-concat 'sh B0) (+ (* allidx 3) ,xyz_num)) 
+		       (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f0_ xyz)) ,xyz)) ,(multi-concat 'xyz xyz))
+		       (- (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'if1_ xyz_int)) xyzp)) ,(multi-concat 'xyz xyz_int)) 
+			 (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'if1_ xyz_int)) ,xyz_int)) ,(multi-concat 'xyz xyz_int)))
+		       (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f1_ xyz-res)) ,xyz-res)) ,(multi-concat 'xyz xyz-res))
+		       )
+		     )))
+	       ;(for-from-to ts 0 5 (LOG_RECORD_INFO "[%.15e %.15e %.15e] " (vrf ,(multi-concat 'if1_ xyz_int "0") ts) (vrf ,(multi-concat 'if1_ xyz_int "1") ts) (vrf ,(multi-concat 'if1_ xyz_int "2") ts)))
+	       ;(LOG_RECORD_INFO ,(multi-concat "dbg4 " B0 xyz '_int xyz_int " = %e\n") (/ (* sum0 Deltat) (- ,(multi-concat XYZ_int "2") ,(multi-concat 'x xyz_int "1")) ))
+	       (set! ,(list 'unquote `vB0) sum0)
+	       )))
+       )
+    ;`(defmacro )
+    `(defmacro ,(multi-concat B0 xyz '_int xyz_int '_ xyz_int lstfix) (x y z xyzp vB0)
+       (set! x (list->string (list (cadr (string->list (symbol->string x))))))
+       (set! y (list->string (list (cadr (string->list (symbol->string y))))))
+       (set! z (list->string (list (cadr (string->list (symbol->string z))))))
+       (set! xyzp (list->string (list (cadr (string->list (symbol->string xyzp))))))
+       ,(list 'quasiquote 
+	  (if upc
+	    `(set! ,(list 'unquote 'vB0)
+	       (get_E1_local_opt ,(multi-concat 'sh B0)
+		 ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'dif1_ xyz_int)) xyzp))
+		 ;,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f1_ xyz-res)) ,xyz-res))
+		 ;,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f0_ xyz)) ,xyz))
+		 ,sec_para_E
+		 ,trd_para_E
+		 ,xyz_num
+		 ,int_dir
+		 )
+	       )
+	  `(block
+	     (declare-double (sum0 0.0))
+	     (fffor-xyz-from-zero-to 5 5 5
+	       (declare-scalar-int (allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz))))))
+	       (force-simd-ver
+	       (incf! sum0 
+		 (* (vrf ,(multi-concat 'sh B0) (+ (* allidx 3) ,xyz_num)) 
+		   (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f0_ xyz)) ,xyz)) ,(multi-concat 'xyz xyz)) 
+		   (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'dif1_ xyz_int)) xyzp)) ,(multi-concat 'xyz xyz_int)) 
+		   (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f1_ xyz-res)) ,xyz-res)) ,(multi-concat 'xyz xyz-res))
+
+		   )
+		 )))
+	     (set! ,(list 'unquote 'vB0) sum0)
+	     )))
+       )
+    `(defmacro ,(multi-concat B0 xyz '_int xyz_int '_ xyz lstfix) (x y z xyzp vB0)
+       (set! x (list->string (list (cadr (string->list (symbol->string x))))))
+       (set! y (list->string (list (cadr (string->list (symbol->string y))))))
+       (set! z (list->string (list (cadr (string->list (symbol->string z))))))
+       (set! xyzp (list->string (list (cadr (string->list (symbol->string xyzp))))))
+       ,(list 'quasiquote 
+	  `(block
+	     (declare-double (sum0 0.0))
+	     (fffor-xyz-from-zero-to 5 5 5
+	       (declare-scalar-int (allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz))))))
+	       (force-simd-ver
+	       (incf! sum0 
+		 (* (vrf ,(multi-concat 'sh B0) (+ (* allidx 3) ,xyz_num)) 
+		   (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'df0_ xyz)) ,xyz)) ,(multi-concat 'xyz xyz)) 
+		   (- (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'if1_ xyz_int)) xyzp)) ,(multi-concat 'xyz xyz_int)) 
+		     (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'if1_ xyz_int)) ,xyz_int)) ,(multi-concat 'xyz xyz_int)))
+		   (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f1_ xyz-res)) ,xyz-res)) ,(multi-concat 'xyz xyz-res))
+
+		   )
+		 )))
+	     (set! ,(list 'unquote 'vB0) sum0)
+	     ))
+       )
+    )
+  )
+(defmacro get-E1 (xyz-num . ExN)
+  (define xyz-all '(x y z))
+  (define xyz-vec (list->vector xyz-all))
+  (define xyz (vector-ref xyz-vec xyz-num))
+  (define xyz-f0 (remove xyz xyz-all))
+  (multi-define y-f0 z-f0 xyz-f0)
+  (define shE0 'shE0)
+  (if (and (pair? ExN) (pair? (cdr ExN)))
+    (set! shE0 (cadr ExN))
+    0
+    )
+  (if (null? ExN)
+  `(block
+     (declare-scalar-double (sum0 0.0))
+     (fffor-xyz-from-zero-to 5 5 5
+       (declare-scalar-int (allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz))))))
+       (incf! sum0
+	 (* (vrf ,shE0 (+ (* allidx 3) ,xyz-num))
+	   (vrf ,(multi-concat 'f1_ xyz "1")  ,(multi-concat 'xyz xyz))
+	   (vrf ,(multi-concat 'f0_ y-f0 "1") ,(multi-concat 'xyz y-f0))
+	   (vrf ,(multi-concat 'f0_ z-f0 "1") ,(multi-concat 'xyz z-f0))
+	   )
+	 )
+       )
+     sum0
+     )
+  `(block
+     (declare-double (sum0 0.0))
+     (fffor-xyz-from-zero-to 5 5 5
+       (declare-scalar-int (allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz))))))
+       (force-simd-ver
+       (incf! sum0
+	 (* (vrf ,shE0 (+ (* allidx 3) ,xyz-num))
+	   (vrf ,(multi-concat 'f1_ xyz "1")  ,(multi-concat 'xyz xyz))
+	   (vrf ,(multi-concat 'f0_ y-f0 "1") ,(multi-concat 'xyz y-f0))
+	   (vrf ,(multi-concat 'f0_ z-f0 "1") ,(multi-concat 'xyz z-f0))
+	   )
+	 ))
+       )
+     (set! ,(car ExN) sum0)
+     )
+  
+  )
+  )
+;(write (gen_intB-proc 'B0 2 1) current-error-port) (newline current-error-port)
+(multi-map 
+  (lambda (B01 xyz add-xyz-int upc)
+    (define real-int (remainder (+ xyz add-xyz-int) 3))
+    (eval-global (gen_intB-proc B01 xyz real-int upc))
+    )
+  '(B0 B1 B2) '(0 1 2) '(1 2) '(#t #f)
+  )
+
+(load "../intbscheme.ss")
+;(load "intbscheme.ss")
+
+(define (replace-lsts expr froms tos)
+  (let loop ((expr expr) (froms froms) (tos tos))
+    (cond
+      ((null? froms) expr)
+      (else
+	(loop (replace-all expr (car froms) (car tos)) (cdr froms) (cdr tos))
+	)
+      )
+    )
+  )
+(defmacro iBvi01 (X1 Y1 Z1 Y2)
+  `(- ,(replace-lsts (flibm0 0) '(X1 Y1 Z1) (list X1 Y2 Z1)) ,(replace-lsts (flibm0 0) '(X1 Y1 Z1) (list X1 Y1 Z1)))
+  ;(replace-lsts (flibm0 0) '(X1 Y1 Z1) '(x1 y1 z1))
+  )
+(defmacro iBvi02 (X1 Y1 Z1 Z2)
+  `(- ,(replace-lsts (flibm1 0) '(X1 Y1 Z1) (list X1 Y1 Z2)) ,(replace-lsts (flibm1 0) '(X1 Y1 Z1) (list X1 Y1 Z1)))
+  )
+(defmacro iBvi10 (X1 Y1 Z1 X2)
+  `(- ,(replace-lsts (flibm2 0) '(X1 Y1 Z1) (list X2 Y1 Z1)) ,(replace-lsts (flibm2 0) '(X1 Y1 Z1) (list X1 Y1 Z1)))
+  )
+(defmacro iBvi12 (X1 Y1 Z1 Z2)
+  `(- ,(replace-lsts (flibm3 0) '(X1 Y1 Z1) (list X1 Y1 Z2)) ,(replace-lsts (flibm3 0) '(X1 Y1 Z1) (list X1 Y1 Z1)))
+  )
+(defmacro iBvi20 (X1 Y1 Z1 X2)
+  `(- ,(replace-lsts (flibm4 0) '(X1 Y1 Z1) (list X2 Y1 Z1)) ,(replace-lsts (flibm4 0) '(X1 Y1 Z1) (list X1 Y1 Z1)))
+  )
+(defmacro iBvi21 (X1 Y1 Z1 Y2)
+  `(- ,(replace-lsts (flibm5 0) '(X1 Y1 Z1) (list X1 Y2 Z1)) ,(replace-lsts (flibm5 0) '(X1 Y1 Z1) (list X1 Y1 Z1)))
+  )

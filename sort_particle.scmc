@@ -1,0 +1,444 @@
+;paravec.scmc general_macros.scmc
+
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include< "assert.h")
+(include< "math.h")
+(eval-scmc-global
+  (begin-map
+    (lambda (rt)
+      (define num -1)
+      (begin-map 
+	(lambda (ptlen)
+	  (begin-map 
+	    (lambda (xyz)
+	      (incf! num)
+	      (define xyzlen (vector-ref (vector 'XLEN 'YLEN 'ZLEN) (remainder num 3)))
+	      `(begin
+		 (defun-class-One_Particle_Collection ,(multi-concat rt 'call_particle_sort_single_ xyz '_ (number->string ptlen)) int ()
+		   (class-header-Field3D_Seq pfield)
+		   (define-long the_xlen (,(multi-concat rt 'pscmc_get_local_len)))
+		   ;(set! the_xlen 1)
+		   (define XLEN xlen)
+		   (define YLEN ylen)
+		   (define ZLEN zlen)
+		   ,(begin-map
+		      (lambda (qv)
+			`(,(multi-concat rt (if (isinlst rt '(cuda_ opencl_ hip_ sycl_)) 'gpu_ "") 'sort_one_grid_ xyz '_ (number->string ptlen) '_scmc_set_parameter_ (car qv)) (vector-ref sort_kernel ,num) ,(car qv))
+			)
+		      quick_variables
+		      )
+		   ,(begin-map
+		      (lambda (qv)
+			`(begin
+			   (,(multi-concat rt 'cu_swap_l '_ (number->string ptlen) '_scmc_set_parameter_ (car qv)) ,(multi-concat 'cu_swap_l_ (number->string ptlen) '_kernel) ,(car qv))
+			   (,(multi-concat rt 'cu_swap_r '_ (number->string ptlen) '_scmc_set_parameter_ (car qv)) ,(multi-concat 'cu_swap_r_ (number->string ptlen) '_kernel) ,(car qv))
+			   )
+			)
+		      '((cu_cache) (cu_xyzw) (adjoint_vec_pids))
+		      )
+		   ,(with-kernel-parameters-exec rt (multi-concat (if (isinlst rt '(cuda_ opencl_ hip_)) 'gpu_ "") 'sort_one_grid_ xyz '_ (number->string ptlen)) '((long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (long grid_cache_len) (long cu_cache_length)) `(vector-ref sort_kernel ,num) -1 'numvec)
+		   (define-long XYZLEN ,xyzlen)
+		   (define-int the_dir_num ,(remainder num 3))
+		   (block
+		     ,(with-kernel-parameters-exec rt (multi-concat 'cu_swap_l '_ (number->string ptlen)) '((long cu_cache_length) (int the_dir_num) (long XYZLEN)) 'cu_swap_l_6_kernel -1 'numvec))
+		   (set! XYZLEN (- XYZLEN))
+		   (block
+		     ,(with-kernel-parameters-exec rt (multi-concat 'cu_swap_r '_ (number->string ptlen)) '((long cu_cache_length) (int the_dir_num) (long XYZLEN)) 'cu_swap_r_6_kernel -1 'numvec))
+		   ;(block ,(with-kernel-parameters-exec rt 'move_back_kernel ((long XLEN) (long YLEN) (long ZLEN) (long grid_cache_len) (long cu_cache_length))))
+		   (return 0)
+		   )
+		 )) '(x y z x_vlo y_vlo z_vlo))) '(6 8)))
+    (map car runtimes)
+    )
+  )
+(eval-scmc-global 
+  (begin-map 
+    (lambda (ptlen)
+      (define ptlen-str (number->string ptlen))
+      (begin-map 
+	(lambda (rt)
+	  `(defun-class-One_Particle_Collection ,(multi-concat rt 'call_move_back_kernel_single '_ ptlen-str) int ()
+	     (class-header-Field3D_Seq pfield)
+	     (define XLEN xlen)
+	     (define YLEN ylen)
+	     (define ZLEN zlen)
+	     (block 
+	       ,(begin-map
+		  (lambda (qv)
+		    `(,(multi-concat rt 'move_back_kernel '_ ptlen-str '_scmc_set_parameter_ (cadr qv)) ,(multi-concat 'move_back_kernel '_ ptlen-str '_kernel) ,(cadr qv))
+		    )
+		  '((double* inoutput) (int* xyzw) (double* cu_cache) (int* cu_xyzw))
+		  )
+	       ,(with-kernel-parameters-exec rt (multi-concat 'move_back_kernel '_ ptlen-str) '((long XLEN) (long YLEN) (long ZLEN) (long grid_cache_len) (long cu_cache_length)) (multi-concat 'move_back_kernel '_ ptlen-str '_kernel) -1 'numvec))
+	     (return 0)
+	     )
+	  )
+	(map car runtimes))) '(6 8))
+  )
+
+
+(define-scmc-global genchsrt 
+  (lambda (xnme vlo ptlen)
+    (define xnme-name (vector-ref #(x y z) xnme))
+    (define vlo-name (if (eq? vlo 1) '_vlo ""))
+    `(if (and (eq? dir ,xnme) (eq? use_vlo ,vlo) (eq? ptlen ,ptlen))
+       (choose_the_runtime (,(multi-concat 'call_particle_sort_single_ xnme-name vlo-name '_ (number->string ptlen)) pthis))
+       )
+    )
+  )
+(defun-class-One_Particle_Collection call_particle_sort_single int ((int dir) (int use_vlo) (int ptlen))
+  (class-header-Field3D_Seq pfield)
+  (eval-scmc-global
+    (begin-map 
+      (lambda (xnme)
+	(begin-map 
+	  (lambda (vlo)
+	    (begin-map
+	      (lambda (ptlen)
+		(genchsrt xnme vlo ptlen)
+		)
+	      '(6 8)
+	      )
+	    )
+	    '(0 1)
+	  )
+	)
+      '(0 1 2)
+      ))
+  )
+(defun-class-One_Particle_Collection dump_particles_mpi int ((FILE* of))
+  (class-header-Field3D_Seq pfield)
+  (choose_the_runtime (pscmc_mem_sync_d2h cu_cache))
+  (choose_the_runtime (pscmc_mem_sync_d2h inoutput))
+  (choose_the_runtime (pscmc_mem_sync_d2h xyzw))
+  (choose_the_runtime (pscmc_mem_sync_d2h cu_xyzw))
+  (define-double* grid_cache_arr (vector-ref (type-convert double** inoutput) 0))
+  (define-double* cu_cache_arr (vector-ref (type-convert double** cu_cache) 0))
+  (define-int* xyzw_arr (vector-ref (type-convert int** xyzw) 0))
+  (define-int* cu_xyzw_arr (vector-ref (type-convert int** cu_xyzw) 0))
+  (define i 0)
+  (for i=0 (< i numvec) i++
+    (define-int offset (* xlen ylen zlen i))
+    (define j 0)
+    (fffor-xyz-from-zero-to xlen ylen zlen
+      (define-long grid_offset (+ offset (GET_IDXYZL xyzx xyzy xyzz 0 1 xlen ylen zlen)))
+      (define load0 (vector-ref xyzw_arr (* 4 grid_offset)))
+	  (for j=0 (< j grid_cache_len) j++
+	      (if 
+		;(or (or (< j load0) (< j (vector-ref xyzw_arr (+ (* 4 grid_offset) 1)))) (and (>= j (vector-ref xyzw_arr (+ (* 4 grid_offset) 2))) (< j (vector-ref xyzw_arr (+ (* 4 grid_offset) 3))))) 
+		(< j load0)
+	    (begin
+	    (define l 0)
+	    (define cur_offset (+ j (* grid_offset grid_cache_len)))
+	    ;(fprintf of "grid=[%d %d %d] xyzw=" xyzx xyzy xyzz)
+	    ;(for l=0 (< l 4) l++ (fprintf of "%d " (vector-ref xyzw_arr (+ (* 4 grid_offset) l))))
+	    (for l=0 (< l (eval-scmc-global 6)) l++
+	      (define opt (vector-ref grid_cache_arr (+ l (* (eval-scmc-global PARTICLE_LEN) cur_offset))))
+	      ;(fprintf of "%e " (- opt (floor opt)))
+	      (fprintf of "%.15e " opt) 
+	      )
+	    ;(fprintf of "grid_offset=%d " grid_offset)
+	    (fprintf of "\n")))
+	    )
+      )
+    (define-long cur_offset (* i cu_cache_length))
+    (define load0 (vector-ref cu_xyzw_arr (* 4 i)))
+    (define load_beg_left (vector-ref cu_xyzw_arr (+ 1 (* 4 i))))
+    (define load_end_left (vector-ref cu_xyzw_arr (+ 2 (* 4 i))))
+    (define load_beg_right (vector-ref cu_xyzw_arr (+ 3 (* 4 i))))
+    (for j=0 (< j load0) j++
+      (define l 0)
+      (for l=0 (< l (eval-scmc-global PARTICLE_LEN)) l++
+	(define opt (vector-ref cu_cache_arr (+ l (* (eval-scmc-global PARTICLE_LEN) (+ cur_offset j)))))
+	;(fprintf of "%e " (- opt (floor opt)))
+	(fprintf of "%e " opt)
+	
+	)
+      ;(fprintf of "cu_offset=%d " i)
+      (fprintf of "\n") 
+      )
+    )
+  (fflush of)
+  (return 0)
+  )
+(defun-class-One_Particle_Collection print_particles_mpi int ((int dir))
+  (class-header-Field3D_Seq pfield)
+  (condmacro 
+    (1
+      (choose_the_runtime (pscmc_mem_sync_d2h cu_cache))
+      (choose_the_runtime (pscmc_mem_sync_d2h inoutput))
+      (choose_the_runtime (pscmc_mem_sync_d2h xyzw))
+      ;(choose_the_runtime (pscmc_mem_sync_d2h cu_load))
+      (choose_the_runtime (pscmc_mem_sync_d2h cu_xyzw))
+      ;(choose_the_runtime (pscmc_mem_sync_d2h load))
+      (define-double* grid_cache_arr (vector-ref (type-convert double** inoutput) 0))
+      (define-double* cu_cache_arr (vector-ref (type-convert double** cu_cache) 0))
+      (define-int* xyzw_arr (vector-ref (type-convert int** xyzw) 0))
+      ;(define-int* load_arr (vector-ref (type-convert int** load) 0))
+      ;(define-int* cu_load_arr (vector-ref (type-convert int** cu_load) 0))
+      (define-int* cu_xyzw_arr (vector-ref (type-convert int** cu_xyzw) 0))
+      (define i 0)
+      (for i=0 (< i numvec) i++
+	(condmacro 
+	  (1
+	    (define-int offset (* xlen ylen zlen i))
+	    (define j 0)
+	    (fffor-xyz-from-zero-to xlen ylen zlen
+	      (define-long grid_offset (+ offset (GET_IDXYZL xyzx xyzy xyzz 0 1 xlen ylen zlen)))
+	      (define load0 (vector-ref xyzw_arr (* 4 grid_offset)))
+	      ;(define load0 (vector-ref load_arr grid_offset))
+	      ;(define beg_left (vector-ref ))
+	      (if 0
+		(begin
+		  (LOG_RECORD_INFO "xyz=[%d %d %d], load=%d " xyzx xyzy xyzz load0)
+		  (for j=0 (< j load0) j++
+		    (define cur_offset (+ j (* grid_offset grid_cache_len)))
+		    (LOG_RECORD_INFO "%e " (vector-ref grid_cache_arr (* (eval-scmc-global PARTICLE_LEN) cur_offset)))
+		    )
+		  (LOG_RECORD_INFO "\n")))
+	      )
+	    (define-long cur_offset (* i cu_cache_length))
+	    (define load0 (vector-ref cu_xyzw_arr (* 4 i)))
+	    (define load_beg_left (vector-ref cu_xyzw_arr (+ 1 (* 4 i))))
+	    (define load_end_left (vector-ref cu_xyzw_arr (+ 2 (* 4 i))))
+	    (define load_beg_right (vector-ref cu_xyzw_arr (+ 3 (* 4 i))))
+
+
+	    (if 1 
+	      (begin 
+		(LOG_RECORD_INFO "cu %d, load=%d " i load0)
+		(for j=0 (< j load0) j++
+		  (define-double* r0 (+ cu_cache_arr (* (eval-scmc-global PARTICLE_LEN) (+ cur_offset j)) ))
+		     (LOG_RECORD_INFO "%e [%e %e %e] " (vector-ref r0 dir) (vector-ref r0 0) (vector-ref r0 1) (vector-ref r0 2))
+		     )
+		(LOG_RECORD_INFO "\n")))
+	    (if (and 0 (- load_end_left load_beg_left)) 
+	      (begin
+		(LOG_RECORD_INFO "ERR: cu %d, left_load=%d beg=%d " i (- load_end_left load_beg_left) load_beg_left)
+		(for j=load_beg_left (< j load_end_left) j++
+		  (LOG_RECORD_INFO "%e " (vector-ref cu_cache_arr (* (eval-scmc-global PARTICLE_LEN) (+ cur_offset j))))
+		  )
+		(LOG_RECORD_INFO "\n")))
+	    (if (and 0 (- cu_cache_length load_beg_right))
+	      (begin
+		(LOG_RECORD_INFO "ERR: cu %d, right_load=%d " i (- cu_cache_length load_beg_right))
+		(for j=load_beg_right (< j cu_cache_length) j++
+		  (LOG_RECORD_INFO "%e " (vector-ref cu_cache_arr (* (eval-scmc-global PARTICLE_LEN) (+ cur_offset j))))
+		  )
+		(LOG_RECORD_INFO "\n"))) )(else ()))
+	)
+      (return 0))
+    (else ())
+    )
+  (return 0)
+  )
+(eval-scmc-global
+  (begin-map
+    (lambda (lor)
+      (define inner_loop_free 
+	`(begin 
+	   (for-from-zero-to i num_runtime
+	     (free (vector-ref p_to_left_len_buffer i))
+	   )
+	   (free p_to_left_len_buffer)
+	   ))
+      (define (gen_inner_loop dir_off_num beg_tl end_tl body . use_long_isend)
+	(if (null? use_long_isend) (set! use_long_isend #f) (set! use_long_isend (car use_long_isend)))
+	(define tll_buffer_alloc_rt '())
+	(define tll_buffer_alloc_vec '())
+	(define tll_buffer_set '())
+	(if use_long_isend
+	  (begin
+	    (set! tll_buffer_alloc_rt `(define-int** p_to_left_len_buffer (TYPE_MALLOC int* num_runtime)))
+	    (set! tll_buffer_alloc_vec `(set! (vector-ref p_to_left_len_buffer i) (TYPE_MALLOC int numvec)))
+	    (set! tll_buffer_set `(set! (vector-ref (vector-ref p_to_left_len_buffer i) j) to_left_len))
+	    )
+	  0
+	  )
+	`(begin
+	   ,tll_buffer_alloc_rt
+	   (for i=0 (< i num_runtime) i++
+	     (class-header-One_Particle_Collection (+ particle_spec_1 i))
+	     (class-header-Field3D_Seq pfield)
+
+	     (define-double* cu_cache_host (vector-ref (type-convert double** cu_cache) 0))
+	     (define-int* cu_xyzw_host (vector-ref (type-convert int** cu_xyzw) 0))
+	     (define-long* adjoint_vec_pids_host (vector-ref (type-convert long** adjoint_vec_pids) 0))
+	     ,tll_buffer_alloc_vec
+
+	     (for j=0 (< j numvec) j++
+	       (define-long* cur_adj_ids (+ adj_ids (* j NUM_SYNC_LAYER)))
+	       (define-long* cur_adj_procs (+ adj_processes (* j NUM_SYNC_LAYER)))
+	       (define-long* cur_local_tid (+ adj_local_tid (* j NUM_SYNC_LAYER)))
+	       (define-long* cur_adjoint_vec_pids (+ adjoint_vec_pids_host (* j 6)))
+	       (define-int* cur_cu_xyzw (+ cu_xyzw_host (* 4 j)))
+	       (define beg_to_left ,beg_tl)
+	       (define end_to_left ,end_tl)
+	       (define-double* cur_cu_cache (+ cu_cache_host (* j cu_cache_length ,PARTICLE_LEN)))
+	       (dec-array long xyzarr 3)
+	       (vector-set! xyzarr 0 1)
+	       (vector-set! xyzarr 1 1)
+	       (vector-set! xyzarr 2 1)
+	       (vector-set! xyzarr dir ,dir_off_num)
+	       (define-long left_pid (vector-ref cur_adj_procs (GET_IDXYZL (vector-ref xyzarr 0) (vector-ref xyzarr 1) (vector-ref xyzarr 2) 0 1 3 3 3)))
+	       (define-long left_proc_id (GET_MPI_PROC_NUM_BY_PID pthis left_pid))
+	       (define-long cur_proc_id (vector-ref (+ adj_processes (* j NUM_SYNC_LAYER)) (/ NUM_SYNC_LAYER 2)))
+	       ;(define-long cur_proc_id (+ (+ adj_processes (* j NUM_SYNC_LAYER)) (/ NUM_SYNC_LAYER 2)))
+	       (define-int local_xyz_all_tmp (GET_IDXYZL (vector-ref xyzarr 0) (vector-ref xyzarr 1) (vector-ref xyzarr 2) 0 1 3 3 3))
+	       (define-long left_id (vector-ref cur_adj_ids local_xyz_all_tmp))
+	       (define-long left_local_tid (vector-ref cur_local_tid local_xyz_all_tmp))
+	       (define-long cur_left_id_ismin1 (vector-ref cur_adjoint_vec_pids (+ (* 2 dir) (/ ,dir_off_num 2))))
+	       ;(LOG_RECORD_INFO "i=%d j=%d dir=%d lft_id=%d don=%d clii=%d\n" i j dir left_id ,dir_off_num cur_left_id_ismin1)
+	       (define-long cur_id (vector-ref cur_adj_ids (/ NUM_SYNC_LAYER 2)))
+	       (define-int to_left_len (- end_to_left beg_to_left))
+	       ,tll_buffer_set
+	       ;(PS_MPI_Isend ("&" to_left_len) 1 PS_MPI_INT left_proc_id left_id comm (+ (vector-ref rqst i) j))
+	       (if (== cur_left_id_ismin1 -1)
+		 (begin . ,body)
+		 )
+	       )
+	     )
+	   )
+	)
+      (define bgl (if (eq? lor 'l) `(vector-ref cur_cu_xyzw 1) `(vector-ref cur_cu_xyzw 3)))
+      (define edl (if (eq? lor 'l) `(vector-ref cur_cu_xyzw 2) 'cu_cache_length))
+      (define lfbgl (if (eq? lor 'l) `(vector-ref cu_xyzw_host (+ (* 4 left_local_tid) 2)) `(vector-ref cu_xyzw_host (+ (* 4 left_local_tid) 3))))
+      (define lfendl (if (eq? lor 'l) `(vector-ref cu_xyzw_host (+ (* 4 left_local_tid) 1))  `cu_cache_length))
+      (define l1l (if (eq? lor 'l) 2 0))
+      (define l2l (if (eq? lor 'l) 0 2))
+`(defun-class-Field3D_MPI ,(concat 'swap_particle_sort_host_ lor) int ((int dir) (int mask))
+  (fffor-xyz-from-zero-to num_spec 1 1
+    (define-One_Particle_Collection* particle_spec_1 (+ particles (* xyzx num_runtime)))
+    (get_ptype-ptlen xyzx)
+    ;(LOG_RECORD_INFO ,(multi-concat "sort p_%d" lor "\n") xyzx)
+    (declare-long i j)
+    (if (or (eq? mask 0) (b-and ptype mask))
+      (begin
+	,(gen_inner_loop l2l bgl edl
+	   `(
+	      ;(LOG_RECORD_INFO "send lfet_pid=%d, beg_to_left=%d to_left_len=%d\n" left_proc_id beg_to_left to_left_len)
+	      (if (or 0 (neq? cur_proc_id left_pid)) 
+		(begin
+		  ;(LOG_RECORD_INFO "send id=%d tll=%d\n" left_id to_left_len)
+		  (PS_MPI_Isend (+ (vector-ref p_to_left_len_buffer i) j) 1 PS_MPI_INT left_proc_id (* left_id 2) comm (+ (vector-ref rqst i) j))
+		  (PS_MPI_Isend (+ cur_cu_cache (* beg_to_left ptlen)) (* to_left_len ptlen) PS_MPI_DOUBLE left_proc_id (+ 1 (* left_id 2)) comm (+ (vector-ref rqst i) numvec j))))
+	      ) #t
+	   )
+	,(gen_inner_loop l1l bgl edl
+	   `(
+	      (define-volatile-int from_right_len)
+	      (define-int cur_len (vector-ref cur_cu_xyzw 0))
+	      (if (or 0 (neq? left_pid cur_proc_id))
+		(begin
+		  ;(LOG_RECORD_INFO "beg recv id=%d\n" cur_id)
+		  (PS_MPI_Recv ("&" from_right_len) 1 PS_MPI_INT left_proc_id (* 2 cur_id) comm NULL)
+		  ;(LOG_RECORD_INFO "recv done id=%d lfet_pid=%d beg_par=%d from_right_len=%d btl=%d\n" cur_id left_proc_id cur_len from_right_len beg_to_left)
+		  (if (>= (+ (vector-ref cur_cu_xyzw 0) from_right_len) beg_to_left)
+		    (LOG_RECORD_INFO "[%e %e %e],offs=[%d %d %d]\n" (vector-ref cur_cu_cache 0) (vector-ref cur_cu_cache 1) (vector-ref cur_cu_cache 2) (vector-ref global_x_offset j) (vector-ref global_y_offset j) (vector-ref global_z_offset j))
+		    )
+		  (assert (< (+ (vector-ref cur_cu_xyzw 0) from_right_len) beg_to_left))
+		  (PS_MPI_Recv (+ cur_cu_cache (* ptlen cur_len)) (* from_right_len ptlen) PS_MPI_DOUBLE left_proc_id (+ 1 (* 2 cur_id)) comm NULL)
+		  ;(LOG_RECORD_INFO "recv done id=%d lfet_pid=%d beg_par=%d from_right_len=%d btl=%d\n" cur_id left_proc_id cur_len from_right_len beg_to_left)
+		  )
+		(begin
+		  (set! from_right_len (- ,lfbgl ,lfendl))
+		  (if (>= (+ (vector-ref cur_cu_xyzw 0) from_right_len) beg_to_left)
+		    (LOG_RECORD_INFO "[%e %e %e],offs=[%d %d %d]\n" (vector-ref cur_cu_cache 0) (vector-ref cur_cu_cache 1) (vector-ref cur_cu_cache 2) (vector-ref global_x_offset j) (vector-ref global_y_offset j) (vector-ref global_z_offset j))
+		    )
+		  (assert (< (+ (vector-ref cur_cu_xyzw 0) from_right_len) beg_to_left))
+		  (memcpy (+ cur_cu_cache (* ptlen cur_len)) (+ cu_cache_host (* left_pid ptlen cu_cache_length) (* ptlen ,lfbgl)) (* from_right_len ptlen (sizeof double )) )
+		  )
+		)
+	      (dec-array long xyzlenarr 3)
+	      (vector-set! xyzlenarr 0 xlen)
+	      (vector-set! xyzlenarr 1 ylen)
+	      (vector-set! xyzlenarr 2 zlen)
+	      (define-long XYZLEN (* (- 1 ,l2l) (vector-ref xyzlenarr dir)))
+	      (fffor-xyz-from-zero-to from_right_len 1 1
+		(incf! (vector-ref cur_cu_cache (+ (* ptlen (+ xyzx cur_len)) dir)) XYZLEN)
+		)
+	      (incf! (vector-ref cur_cu_xyzw 0) from_right_len)
+	      )
+	   )
+	,(gen_inner_loop l2l 0 0
+	   `(
+	      (if (or 0 (neq? cur_proc_id left_pid))
+		(begin
+		  (PS_MPI_Wait (+ (vector-ref rqst i) j) NULL)
+		  (PS_MPI_Wait (+ (vector-ref rqst i) numvec j) NULL))))
+	   )
+	,inner_loop_free))
+    )
+  (return 0)
+  )) '(l r)))
+
+
+(defun-class-Field3D_MPI dump_particles void ((FILE* fp))
+  (define i 0)
+  (for i=0 (< i (* num_spec num_runtime)) i++
+    (dump_particles_mpi (+ particles i) fp)
+    )
+  (fflush fp)
+  )
+(eval-scmc-global 
+`(begin 
+   (defun-class-Field3D_MPI call_particle_sort_mpi_mask int ((int dir) (int use_vlo) (int mask))
+     ;(fffor-xyz-from-zero-to num_spec num_runtime)
+     (define i 0)
+     (for i=0 (< i (* num_spec num_runtime)) i++
+       ;(dump_particles_mpi (+ particles i) stderr)
+       ;(define-int ptype (vrf (structp-ref (type-convert Particle_in_Cell_MPI* pthis) o_particle_type) (/ i num_runtime)))
+       ;(define-int ptlen (if (eq? ptype 2) 8 6))
+       (get_ptype-ptlen (/ i num_runtime))
+       (if (or (eq? mask 0) (b-and mask ptype))
+	 (begin
+	   (call_particle_sort_single (+ particles i) dir (if ptype 0 use_vlo) ptlen)
+	   (class-header-One_Particle_Collection (+ particles i))
+	   (class-header-Field3D_Seq pfield)
+	   (choose_the_runtime (pscmc_mem_sync_d2h cu_cache))
+	   (choose_the_runtime (pscmc_mem_sync_d2h cu_xyzw))
+	   )
+	 )
+       )
+
+     ;(LOG_RECORD_INFO "bef sortl ok\n")
+     ;(for-from-zero-to j (* num_runtime num_spec) (print_particles_mpi (+ particles j) dir))
+     ;(LOG_RECORD_INFO "aft sortl ok\n")
+     (swap_particle_sort_host_l pthis dir mask)
+     ;(LOG_RECORD_INFO "here ok\n")
+     ;(for-from-zero-to j (* num_runtime num_spec) (print_particles_mpi (+ particles j) dir))
+     ;(LOG_RECORD_INFO "aft here ok\n")
+     (swap_particle_sort_host_r pthis dir mask)
+
+     (for i=0 (< i (* num_runtime num_spec)) i++
+       (class-header-One_Particle_Collection (+ particles i))
+       (class-header-Field3D_Seq pfield)
+       (choose_the_runtime (pscmc_mem_sync_h2d cu_cache))
+       (choose_the_runtime (pscmc_mem_sync_h2d cu_xyzw))
+       ;(define-int ptype (vrf (structp-ref (type-convert Particle_in_Cell_MPI* pthis) o_particle_type) (/ i num_runtime)))
+       (get_ptype-ptlen (/ i num_runtime))
+       (if (or (eq? ptype 0) (b-and mask ptype))
+	 (if (eq? ptlen 6)
+	   (choose_the_runtime (call_move_back_kernel_single_6 (+ particles i)))
+	   (choose_the_runtime (call_move_back_kernel_single_8 (+ particles i)))
+	   )
+	 )
+       ;(choose_the_runtime (pscmc_mem_sync_d2h cu_cache))
+       ;(choose_the_runtime (pscmc_mem_sync_d2h cu_xyzw))
+       ;(print_particles_mpi (+ particles i) dir)
+       )
+     (return 0)
+     )
+   (defun-class-Field3D_MPI call_particle_sort_mpi int ((int dir) (int use_vlo))
+     (call_particle_sort_mpi_mask pthis dir use_vlo 0)
+     )
+   ))
+
+

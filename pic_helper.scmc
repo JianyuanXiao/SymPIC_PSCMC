@@ -1,0 +1,323 @@
+
+(define scal-vars-for-geo-rel-slab '((long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double DELTA_X) (double DELTA_Y) (double DELTA_Z)))
+(define xyzw-vars-for-geo-rel-slab '((int* xyzw) (double* cu_cache) (int* cu_xyzw) (int* xoffset) (int* yoffset) (int* zoffset)))
+(define (gen-pic-helper-funs ker-var n ker-name pic-args field-args fix-vars fix-vec-vars call-fun-args-pfx call-fun-args-mpi-pfx extr-args-spec extr-args particle-type . opt-args-macro)
+  ;(write-string (multi-concat "" ker-name " tp=" (number->string particle-type) "\n") current-error-port)
+  (define num-proc 'numvec)
+  (if (not (null? opt-args-macro))
+    (set! num-proc (car opt-args-macro))
+    0
+    )
+  (define allargs 
+    (append 
+      (map (lambda (x) (list 'One_Particle_Collection* x)) (cdr pic-args))
+      (map (lambda (x) (list 'Field3D_Seq* x)) field-args)
+      (map 
+	(lambda (x) 
+	  (multi-define tp name x)
+	  (list tp (multi-concat name '_lst_fix))
+	  ) extr-args-spec)
+      extr-args
+      ))
+  (define mpi-allargs 
+    (append 
+      (map (lambda (x) (list 'Particle_in_Cell_MPI* x)) (cdr pic-args))
+      (map (lambda (x) (list 'Field3D_MPI* x)) field-args)
+      (map (lambda (x) (list 'double* (cadr x))) extr-args-spec)
+      extr-args
+      ))
+
+  (define (init-fun)
+    `(block
+       (declare size_t structlen)
+       (choose_the_runtime (,(multi-concat ker-name "_get_struct_len") ("&" structlen) ))
+       (vector-set! (structp-ref pthis ,ker-var) ,n (malloc structlen))
+       (choose_the_runtime (,(multi-concat ker-name "_init") pe (vector-ref (structp-ref pthis ,ker-var) ,n))) 
+       )
+    )
+  (define (call-fun rt)
+    (define mpn0 -1) 
+    ;(write fix-vars current-error-port) (newline current-error-port)
+    `(begin
+       (defun-class-One_Particle_Collection ,(multi-concat rt 'One_Particle_Collection_ ker-name) int ,(append allargs '((int SPEC) (int NUM_SPEC)))
+	 ,(call-fun-args-pfx)
+	 ,(begin-map
+	    (lambda (x)
+	      (incf! mpn0)
+	      (if (null? x) '()
+	      `(,(multi-concat rt ker-name '_scmc_set_parameter_ x) (vector-ref ,ker-var ,n) 
+		 ,(if (eq? mpn0 0)
+		    'inoutput
+		    `(structp-ref ,x inoutput)
+		    )
+		 ))
+	      )
+	    pic-args
+	    )
+	 ,(begin-map
+	    (lambda (x)
+	      `(,(multi-concat rt ker-name '_scmc_set_parameter_ x) (vector-ref ,ker-var ,n) (structp-ref ,x main_data))
+	      ) field-args 
+	    )
+	 ,(begin-map
+	    (lambda (x)
+	      (set! x (cadr x))
+	      `(,(multi-concat rt ker-name '_scmc_set_parameter_ x) (vector-ref ,ker-var ,n) ,x)
+	      ) fix-vec-vars
+	    )
+	 (block
+	   ,(begin-map 
+	     (lambda (x) 
+	       (multi-define tp name x)
+	       `(declare ,tp (,name ,(multi-concat name '_lst_fix)))
+	       ) extr-args-spec)
+	   ,(with-kernel-parameters rt ker-name
+	      (append fix-vars extr-args-spec extr-args)
+	      `(vector-ref ,ker-var ,n)
+	      `(,(multi-concat rt ker-name '_exec) (vector-ref ,ker-var ,n) (,(multi-concat rt ker-name '_get_xlen)) ,num-proc) 
+	      ))
+	 (return 0)
+	 )
+       )
+    )
+  (define (call-fun-seq-mpi)
+    (define seqname (multi-concat 'One_Particle_Collection_ ker-name))
+    `(begin
+       (defun-class-One_Particle_Collection ,seqname int ,(append allargs '((int spec) (int num_spec)))
+	 (class-header-Field3D_Seq pfield)
+
+	 (choose_the_runtime (,seqname pthis . ,(append (map (lambda (x) (cadr x)) allargs) '(spec num_spec))))
+	 (return 0)
+	 )
+       (defun-class-Particle_in_Cell_MPI ,(multi-concat 'MPI_ ker-name '_mask) int ,(append mpi-allargs `((int mask)))
+	 (define i 0)
+	 ,(call-fun-args-mpi-pfx)
+	 (define-int num_spec (struct-ref MPI_fieldE num_spec))
+	 (define-int num_runtime (struct-ref MPI_fieldE num_runtime))
+	 (for i=0 (< i (* num_runtime num_spec)) i++ 
+	   (define-int cur_spec (/ i num_runtime))
+	   (if (b-and (vrf o_particle_type cur_spec) mask)
+	     ;(define data0 data)
+	     ;(class-header-Field3D_MPI inEB)
+	     (,seqname (+  (struct-ref MPI_fieldE particles) i) . 
+	       ,(append 
+		  (map (lambda (x) `(+ (struct-ref (structp-ref ,x MPI_fieldE) particles) i)) (cdr pic-args)) 
+		  (map (lambda (x) `(+ (structp-ref ,x data) (remainder i num_runtime))) field-args) 
+		  (map (lambda (x) `(vector-ref ,(cadr x) (/ i num_runtime))) extr-args-spec)
+		  (map cadr extr-args)
+		  '(cur_spec num_spec)
+		  )))
+	   )
+	 (return 0)
+	 )
+       (defun-class-Particle_in_Cell_MPI ,(multi-concat 'MPI_ ker-name) int ,mpi-allargs
+	 (define i 0)
+	 ,(call-fun-args-mpi-pfx)
+	 (define-int num_spec (struct-ref MPI_fieldE num_spec))
+	 (define-int num_runtime (struct-ref MPI_fieldE num_runtime))
+	 (for i=0 (< i (* num_runtime num_spec)) i++ 
+	   (define-int cur_spec (/ i num_runtime))
+	   (if (eq? (vrf o_particle_type cur_spec) ,particle-type)
+	     ;(define data0 data)
+	     ;(class-header-Field3D_MPI inEB)
+	     (,seqname (+  (struct-ref MPI_fieldE particles) i) . 
+	       ,(append 
+		  (map (lambda (x) `(+ (struct-ref (structp-ref ,x MPI_fieldE) particles) i)) (cdr pic-args)) 
+		  (map (lambda (x) `(+ (structp-ref ,x data) (remainder i num_runtime))) field-args) 
+		  (map (lambda (x) `(vector-ref ,(cadr x) (/ i num_runtime))) extr-args-spec)
+		  (map cadr extr-args)
+		  '(cur_spec num_spec)
+		  )))
+	   )
+	 (return 0)
+	 )
+       )
+    )
+  (list init-fun call-fun call-fun-seq-mpi)
+  )
+(define (gen-multi-pic-helper-funs ker-var n ker-names pic-args field-args fix-vars fix-vec-vars call-fun-args-pfx call-fun-args-mpi-pfx extr-args-spec extr-args . opt-args-macro)
+  (define num-proc 'numvec)
+  (define particle-type 0)
+  (if (not (null? opt-args-macro))
+    (begin
+    (set! num-proc (car opt-args-macro))
+    (if (not (null? (cdr opt-args-macro)))
+      (set! particle-type (cadr opt-args-macro))
+      0
+      )
+    )
+    0
+    )
+  (let loop ((n n) (init-funs '()) (call-funs '()) (call-funs-seq-mpi '()) (ker-names ker-names))
+    (cond
+      ((null? ker-names) 
+	(list 
+	  (lambda () 
+	    (begin-map (lambda (x) (x)) init-funs)) 
+	  (lambda (rt)
+	    (begin-map (lambda (x) (x rt)) call-funs)
+	    )
+	  (lambda ()
+	    (begin-map (lambda (x) (x)) call-funs-seq-mpi)
+	    )
+	  ))
+      (else
+	(multi-define init-fun call-fun call-fun-seq-mpi (gen-pic-helper-funs ker-var n (car ker-names) pic-args field-args fix-vars fix-vec-vars call-fun-args-pfx call-fun-args-mpi-pfx extr-args-spec extr-args particle-type num-proc))
+	(loop (+ n 1) (cons init-fun init-funs) (cons call-fun call-funs) (cons call-fun-seq-mpi call-funs-seq-mpi) (cdr ker-names))
+	)
+      )
+    )
+  )
+(define pic-helper-predef-fix 
+  `(begin 
+    (class-header-Field3D_Seq pfield)
+    (define XLEN xlen)
+    (define YLEN ylen)
+    (define ZLEN zlen)
+    (define DELTA_X delta_x)
+    (define DELTA_Y delta_y)
+    (define DELTA_Z delta_z)
+    )
+  )
+(multi-define init-fun-boris call-fun-boris call-fun-seq-mpi-boris
+  (gen-multi-pic-helper-funs 'boris_yee_kernel 0 '(boris_yee)
+    '(inoutput) '(fieldE fieldB FoutJ)
+    `((long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length))
+    '((int* xyzw) (double* cu_cache) (int* cu_xyzw))
+    (lambda ()
+      pic-helper-predef-fix
+      )
+    (lambda () '())
+    '((double Mass0) (double Charge0 ))
+    '((double Deltat))
+    )
+  )
+
+(multi-define init-fun-rel call-fun-rel call-fun-seq-mpi-rel
+  (gen-multi-pic-helper-funs 'rel_1st_kernel 0 '(relng_1st relng_1st_goto) 
+    '(inoutput) '(fieldE fieldB fieldB1 FoutJ)
+    scal-vars-for-geo-rel-slab
+    xyzw-vars-for-geo-rel-slab
+    (lambda ()
+      pic-helper-predef-fix
+      )
+    (lambda () '())
+    '((double Mass0) (double Charge0 )) 
+    '((double Deltat) (double Tori_X0) (double Solve_Err))
+    )
+  )
+(multi-define init-fun-krook call-fun-krook call-fun-seq-mpi-krook
+  (gen-multi-pic-helper-funs 'krook_collision_test_kernel 0 '(krook_collision_test krook_collision_remove_small_speed) 
+    '(inoutput) '(fieldE fieldB FoutJ)
+    '((long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length))
+    '((int* xyzw) (double* cu_cache) (int* cu_xyzw))
+    (lambda ()
+      pic-helper-predef-fix
+      )
+    (lambda () '())
+    '((double Mass0) (double Charge0 )) 
+    '((double Deltat) (double mu_freq))
+    )
+  )
+(multi-define init-fun-geo-rel call-fun-geo-rel call-fun-seq-mpi-geo-rel
+  (gen-multi-pic-helper-funs 'geo_rel_1st_kernel 0 `(geo_rel_1st_fwd geo_rel_1st_bwd) 
+    '(inoutput) '(fieldE fieldB fieldB1 FoutJ)
+    scal-vars-for-geo-rel-slab
+    xyzw-vars-for-geo-rel-slab
+    (lambda ()
+      pic-helper-predef-fix
+      )
+    (lambda () '())
+    '((double Mass0) (double Charge0 )) 
+    '((double Deltat) (double Tori_X0) (double Solve_Err))
+    )
+  )
+(defmacro add-init-call-mpi-funs (i-fun c-fun c-fun-mpi lsts)
+  (define ti (gensym))
+  (define cf (gensym))
+  (define cfm (gensym))
+  `(begin
+     (multi-define ,ti ,cf ,cfm ,lsts)
+     (set! ,i-fun (let ((funs (cons ,ti ,i-fun))) (lambda () (list 'begin ((car funs)) ((cdr funs))))))
+     (set! ,c-fun (let ((funs (cons ,cf ,c-fun))) (lambda (rt) (list 'begin ((car funs) rt) ((cdr funs) rt)))))
+     (set! ,c-fun-mpi (let ((funs (cons ,cfm ,c-fun-mpi))) (lambda () (list 'begin ((car funs)) ((cdr funs))))))
+     )
+  )
+(add-init-call-mpi-funs init-fun-geo-rel call-fun-geo-rel call-fun-seq-mpi-geo-rel
+  (gen-multi-pic-helper-funs 'geo_rel_1st_kernel 2 `(geo_rel_1st_fwd_small_grids geo_rel_1st_bwd_small_grids relng_1st_small_grids geo_rel_1st_fwd_sg2_small_grids geo_rel_1st_bwd_sg2_small_grids relng_1st_sg2_small_grids) 
+    '(inoutput) '(fieldE fieldB fieldB1 LFoutJ)
+    scal-vars-for-geo-rel-slab
+    xyzw-vars-for-geo-rel-slab
+    (lambda ()
+      pic-helper-predef-fix
+      )
+    (lambda () '())
+    '((double Mass0) (double Charge0 )) 
+    '((double Deltat) (double Tori_X0) (double Solve_Err))
+    '(* numvec XLEN YLEN ZLEN)
+    )
+  )
+(map 
+  (lambda (foutj-arg kers)
+    (add-init-call-mpi-funs init-fun-geo-rel call-fun-geo-rel call-fun-seq-mpi-geo-rel
+      (gen-multi-pic-helper-funs 'nonrel_test_kernel 0 kers
+	'(inoutput) `(fieldE fieldB ,foutj-arg FoutEN)
+	'((long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (int SPEC) (int NUM_SPEC) (double DELTA_X) (double DELTA_Y) (double DELTA_Z))
+	'((int* xyzw) (double* cu_cache) (int* cu_xyzw))
+	(lambda () pic-helper-predef-fix)
+	(lambda () '())
+	'((double Mass) (double Charge )) 
+	'((double Deltat))
+	'numvec
+	)
+      )) '(FoutJ LFoutJ) 
+  (list 
+    (apply append 
+      (map (lambda (x) (list x (concat x '_vlo))) '(split_pass_x split_pass_y split_pass_z split_pass_E_particle)))
+    '(split_pass_x_vlo_sg2_small_grids split_pass_y_vlo_sg2_small_grids split_pass_z_vlo_sg2_small_grids)
+    ))
+(add-init-call-mpi-funs init-fun-geo-rel call-fun-geo-rel call-fun-seq-mpi-geo-rel 
+  (gen-multi-pic-helper-funs 'nonrel_test_kernel 24
+    '(slab_midp_nr_Bfield_pushJ_vlo slab_midp_nr_Bfield_pushJ slab_midp_nr_Bfield_pushJ_nopush_par slab_midp_nr_Bfield_pushJ_nopush_par_vlo)
+    '(inoutput) '(fieldE fieldE1 fieldB fieldB1 FoutJ)
+    scal-vars-for-geo-rel-slab
+    xyzw-vars-for-geo-rel-slab
+    (lambda () pic-helper-predef-fix)
+    (lambda () '())
+    '((double Mass0) (double Charge0 )) 
+    '((double Deltat) (double Tori_X0) (double r0) (double MIN_R0) (double Q0) (double b0) (double zmid))
+    'numvec
+    )
+  )
+(add-init-call-mpi-funs init-fun-geo-rel call-fun-geo-rel call-fun-seq-mpi-geo-rel
+  (gen-multi-pic-helper-funs 'nonrel_test_kernel 13
+    '(geo_nr geo_nr_vlo geo_nr_Bfield_pushJ geo_nr_Bfield_pushJ_vlo ngeo_gc geo_nr_Bfield_pushJ_nopush_par_vlo geo_nr_Bfield_pushJ_nopush_par slab_nr_Bfield_pushJ_nopush_par slab_nr_Bfield_pushJ_nopush_par_vlo slab_nr_Bfield_pushJ slab_nr_Bfield_pushJ_vlo)
+    '(inoutput) '(fieldE fieldB fieldB1 FoutJ)
+    '((long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double DELTA_X) (double DELTA_Y) (double DELTA_Z))
+    '((int* xyzw) (double* cu_cache) (int* cu_xyzw) (int* xoffset) (int* yoffset) (int* zoffset))
+    (lambda () pic-helper-predef-fix)
+    (lambda () '())
+    '((double Mass0) (double Charge0 )) 
+    '((double Deltat) (double Tori_X0) (double r0) (double MIN_R0) (double Q0) (double b0) (double zmid))
+    'numvec
+    )
+  )
+(define implicit_kernels '(implicit_2nd_tori_rel implicit_2nd_tori_nr implicit_2nd_slab_nr implicit_2nd_slab_rel))
+(add-init-call-mpi-funs init-fun-geo-rel call-fun-geo-rel call-fun-seq-mpi-geo-rel 
+  (gen-multi-pic-helper-funs 'geo_rel_slab_nr_2nd_kernel 0
+    (append implicit_kernels (map (lambda (x) (concat x '_midp_nopush_par)) implicit_kernels) (map (lambda (x) (concat x '_midp_nopushJ)) implicit_kernels))
+    '(inoutput) '(fieldE fieldB fieldB1 FoutJ)
+    scal-vars-for-geo-rel-slab
+    xyzw-vars-for-geo-rel-slab
+    (lambda () pic-helper-predef-fix)
+    (lambda () '())
+    '((double Mass0) (double Charge0 )) 
+    '((double Deltat) (double Tori_X0) (double Solve_Err))
+    'numvec
+    )
+  )
+(define particle_struct_set_vars  '((Field3D_Seq* pfield)))
+(define particle_struct_set_vvars '((double Mass) (double Charge ) (double Number_particle_per_marker) (long grid_cache_len) (long cu_cache_length)))
+(define particle_struct_non_uni_cachelen_vars '(grid_cache_len cu_cache_length))
+(define particle_struct_set_all_vars (append particle_struct_set_vars particle_struct_set_vvars))
+

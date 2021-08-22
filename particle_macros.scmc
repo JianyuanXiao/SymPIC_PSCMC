@@ -1,0 +1,2069 @@
+(define-scmc-global USE_PREFETCH #f)
+(define-scmc-global USE_SYNC_WHEN_REDUCING_SMALL_ARRAY #t)
+(define-scmc-global USE_COND_WHEN_REDUCING_SMALL_ARRAY #t)
+(defmacro reduce_small (num)
+  (if USE_COND_WHEN_REDUCING_SMALL_ARRAY
+    `(if (< remidx ,num)
+       (incf! (vector-ref incJxtmp __idx) (vector-ref incJxtmp (+ __idx ,num)))
+       )
+    `(incf! (vector-ref incJxtmp __idx) (vector-ref incJxtmp (+ __idx ,num)))
+    )
+  )
+(defmacro small_sync ()
+  (if USE_SYNC_WHEN_REDUCING_SMALL_ARRAY
+    `(sync-local)
+    '()
+    )
+  )
+(define-scmc-global PAR_CACHE_LEN 
+  (if (eq? RUNTIME 'SWMC) 64 1)
+  )
+(define-scmc-global IDX_LCL_SPEC_LEN 
+  (if_isgpu 4 1)
+  )
+(define-scmc-global PARA_FOR_INNER_EXPAND 1)
+
+(define-scmc-global rel_vars '((double* inoutput) (int* xyzw) (double* cu_cache) (int* cu_xyzw) (int* xoffset) (int* yoffset) (int* zoffset) (double* fieldE) (double* fieldB) (double* fieldB1) (double* FoutJ) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double DELTA_X) (double DELTA_Y) (double DELTA_Z) (double Mass0) (double Charge0 ) (double Deltat) (double Tori_X0) (double Solve_Err)))
+(define-scmc-global rel_vars_mu '((double* inoutput) (int* xyzw) (double* cu_cache) (int* cu_xyzw) (int* xoffset) (int* yoffset) (int* zoffset) (double* fieldE) (double* fieldB) (double* fieldB1) (double* fielddB1) (double* FoutJ) (double* FoutJloop) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double DELTA_X) (double DELTA_Y) (double DELTA_Z) (double Mass0) (double Charge0 ) (double Deltat) (double Tori_X0) (double Solve_Err)))
+
+
+(define-scmc-global use_swmc_512 (if (symbol-binded? 'use_swmc_512) use_swmc_512 #f))
+(define-scmc-global gen-B-funs-n 
+  (lambda (B0 xyz_num int_dir prefix)
+    (define xyz-vec (list->vector '(x y z x y z)))
+    (define XYZ-vec (list->vector '(X Y Z x y z)))
+    (define xyz (vector-ref xyz-vec xyz_num))
+    (define xyz_int (vector-ref xyz-vec int_dir ))
+    (define XYZ_int (vector-ref XYZ-vec int_dir ))
+    (define xyz-all '(x y z))
+    (define xyz-res (car (remove xyz_int (remove xyz xyz-all))))
+    `(begin
+       (defun ,(multi-concat prefix xyz '_int xyz_int) double ((double* shB0) (double x) (double y) (double z) (double xyzp))
+	 (define sum0 0.0)
+	 (for-xyz-from-zero-to 5 5 5
+	   (declare-int (allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz))))))
+	   (incf! sum0
+	     (* (vrf shB0 (+ (* allidx 3) ,xyz_num)) 
+	       (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f0_ xyz)) ,xyz)) ,(multi-concat 'xyz xyz))
+	       (- (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'if1_ xyz_int)) xyzp)) ,(multi-concat 'xyz xyz_int)) 
+		 (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'if1_ xyz_int)) ,xyz_int)) ,(multi-concat 'xyz xyz_int)))
+	       (vrf ,(list 'unquote `(multi-concat ,(list 'quote (multi-concat 'f1_ xyz-res)) ,xyz-res)) ,(multi-concat 'xyz xyz-res))
+	       )
+	     )
+	   )
+	 )
+       ;(defmacro ,(multi-concat ))
+       )
+    ))
+(defmacro for-from-zero-to-cache-opt args
+  (apply for-from-zero-to-cache-opt-proc args)
+  )
+(define-scmc-global for-from-zero-to-cache-opt-proc
+  (lambda (vec_map par_cache_len i imax body1 body2)
+    (define modified-i (concat i (gensym)))
+    (if (and USE_VEC (isinlst RUNTIME '(C OpenMP COI)))
+      `(block
+	 ,(begin-map 
+	    (lambda (x)
+	      (define global_pos '())
+	      (if (>= (length x) 5) (begin (set! global_pos (car x)) (set! x (cdr x))) 0) ;global_len will be ignored if global var is not specified
+	      (multi-define name type len global_len x)
+	      (if (null? global_pos)
+		'()
+		`(begin 
+		   (pure-text ,(multi-concat "\n\t" type " (*" name ")[" (number->string global_len) "];\n"))
+		   (set! ,name ,global_pos)
+		   )
+		;`(declare ,(list type ,global_len))
+		)
+	      )
+	    vec_map
+	    )
+	 (block
+	   (paraforn (,VECLEN ,(* VECLEN 8) . ,(if USE_INTRIN (list SIMD_INTRIN_MAP) '())) ,i 0 ,imax
+	     ;(define-long ,i )
+	     ;(pure-text "\n#pragma omp simd\n")
+	     ;(for (set! ,i 0) (< ,i ,imax) (incf! ,i)
+	     ,(begin-map
+		(lambda (x)
+		  (define global_pos '())
+		  (if (>= (length x) 5) (begin (set! global_pos (car x)) (set! x (cdr x))) 0) ;global_len will be ignored if global var is not specified
+		  (multi-define name type len global_len x)
+		  (if (null? global_pos)
+		    `(dec-local-array ,type ,name 1 ,len)
+		    '()
+		    )
+		  )
+		vec_map
+		)
+	     (block
+	       ,body1
+	       )
+	     (block
+	       ,body2
+	       )
+	     )))
+      `(block 
+	 (define ,modified-i 0)
+	 (for 0 (< (+ ,modified-i (* __idx ,par_cache_len)) ,imax) (incf! ,modified-i (* ,par_cache_len __xlen))
+	   (define-long iba_tmp (+ (* __idx ,par_cache_len) ,modified-i))
+	   (define-long numcp
+	     ,(case RUNTIME
+		('SWMC `(if (>= (+ iba_tmp ,par_cache_len) ,imax) (- ,imax iba_tmp) ,par_cache_len))
+		(else 1)
+		)
+	     )
+	   ,(begin-map 
+	      (lambda (x)
+		(define global_pos '())
+		(if (>= (length x) 5) (begin (set! global_pos (car x)) (set! x (cdr x))) 0) ;global_len will be ignored if global var is not specified
+		(multi-define name type len global_len x)
+		;(define new-name (concat name '_local))
+		`(begin 
+		   (dec-local-array ,type ,name ,par_cache_len ,len)
+		   ,(if (null? global_pos) 0
+		      `(GET_SPARSE_MEMORY (vrf ,name 0) (+ ,global_pos (* iba_tmp ,global_len)) numcp ,global_len ,len))
+		   )
+		) vec_map
+	      )
+	   (for-from-to ,i 0 numcp
+	     ,body1
+	     )
+	   (for-from-to ,i 0 numcp
+	     ,body2
+	     )
+	   ,(begin-map
+	      (lambda (x)
+		(define global_pos '())
+		(if (>= (length x) 5) (begin (set! global_pos (car x)) (set! x (cdr x))) 0)
+		(multi-define name type len global_len x)
+		;(define new-name (concat name '_local))
+		(if (null? global_pos) 0
+		  `(begin 
+		     ;(dec-local-array ,type ,new-name ,par_cache_len ,len)
+		     (PUT_SPARSE_MEMORY (+ ,global_pos (* iba_tmp ,global_len)) (vrf ,name 0) numcp ,global_len ,len)
+		     ))
+		) vec_map
+	      )
+	   )
+	 )))
+  )
+
+(define-scmc-global kernel_gen_imifun 
+  (lambda (rel_file addJ use_small_grid use_tori . floorx)
+    ;(define tflx (if (null? floorx) 'mass_floorx (car floorx)))
+    (define tflx (if (null? floorx) 'floor (car floorx)))
+    (define use-push-par #t)
+    (define cpp-mode #f) ;#f disable; 1 mcp-explicit; 2 mcp-implicit
+    (define tmp_parlen PARTICLE_LEN)
+    (if (and (pair? floorx) (pair? (cdr floorx)))
+      (begin 
+	(set! use-push-par (cadr floorx))
+	(if (pair? (cddr floorx))
+	  (begin
+	    (set! PARTICLE_LEN (caddr floorx))
+	    (if (pair? (cdddr floorx))
+	      (begin
+		(set! cpp-mode (cadddr floorx))
+		)
+	      0
+	      )
+	    )
+	  0
+	  )
+	)
+      0
+      )
+    (load rel_file)
+    (define gen-newton 
+      (lambda (vars res-all jac-all zmax solve-err)
+	(define numdim (vector-length vars))
+	(define numdim-jac (* numdim numdim))
+	(define vars-list (vector->list vars))
+
+	(define (CALL_MAXERR val n)
+	  `(begin
+	     (set! maxerr 0)
+	     (inner-for-from-to i 0 ,n
+	       (define-double absvalv (fabs (vector-ref ,val i)))
+	       (define-scalar-double absval (reduce fmax absvalv))
+	       (set! maxerr (if (> absval maxerr) absval maxerr))
+	       )
+	     )
+	  )
+	(define (seq n)
+	  (let loop ((n0 0) (l0 '()))
+	    (cond
+	      ((eq? n0 n) (reverse l0))
+	      (else
+		(loop (+ n0 1) (cons n0 l0))
+		)
+	      )
+	    )
+	  )
+	(define (CALL_INV_JAC opt inp numdim) ;currently only 3x3 matrix is supported
+	  (optload "../matinv.ss")
+	  (define numall (* numdim numdim))
+	  `(block 
+	     (begin . 
+	       ,(multi-map 
+		  (lambda (i j) 
+		    `(define-double 
+		       ,(multi-concat 'r (number->string i) (number->string j)) (vector-ref ,inp ,(+ j (* i numdim))))
+		    )
+		  (seq numdim) (seq numdim)
+		  )
+	       )
+	     (define-double jactmp (/ 1  ,(eval (list (multi-concat 'fl (number->string numall)) 0))))
+	     ;(LOG_RECORD_INFO "det=%e\n" jactmp)
+	     (begin .
+	       ,(multi-map 
+		  (lambda (i j)
+		    `(force-simd-ver
+		       (vector-set! ,opt ,(+ (* i numdim) j) (* jactmp ,(eval (list (multi-concat 'fl (number->string (+ j (* i numdim)))) 0))))
+		       ;(LOG_RECORD_INFO "invjac=%e\n" (vrf ,opt ,(+ (* i numdim) j)))
+		       )
+		    )
+		  (seq numdim) (seq numdim)
+		  )
+	       )
+	     )
+	  )
+	(define (CALL_MAT_MV lres res ijac numdim)
+	  (begin-map
+	    (lambda (n)
+	      `(force-simd-ver
+	      (vector-set! ,lres ,n
+		 (+ . ,(map (lambda (j) `(* (vector-ref ,ijac ,(+ j (* n numdim))) (vector-ref ,res ,j))) (seq numdim)))
+		 ))
+	      ) 
+	    (seq numdim)
+	    )
+	  )
+	(define (CALL_VEC_SUB x y z numdim)
+	  (begin-map
+	    (lambda (n)
+	      `(force-simd-ver
+	      (set! ,(vector-ref x n) (- ,(vector-ref y n) (vector-ref ,z ,n))))
+	      ) (seq numdim)
+	    )
+	  )
+	(define (gen-x2-vec-set)
+	  ;(optloa)
+	  `(block
+	     (force-simd-ver
+	     (define xx2 X2)
+	     (define xy2 Y2)
+	     (define xz2 Z2)
+	     (define-double Midx2 (,tflx xx2))
+	     (define-double Midy2 (,tflx xy2))
+	     (define-double Midz2 (,tflx xz2))
+	     (define-double rx2 (- xx2 Midx2))
+	     (define-double ry2 (- xy2 Midy2))
+	     (define-double rz2 (- xz2 Midz2)) 
+	     ;(LOG_RECORD_INFO "dbgx2: [ry2=%e]\n" ry2)
+	     ,(if use_tori
+	       `(begin
+		  ,(remove-block-return-set! 'RPL00 (flr15 0))
+		  ,(remove-block-return-set! 'RPL10 (flr16 0))
+		  ,(remove-block-return-set! 'RPL20 (flr17 0))) '())
+	     (begin .
+	       ,(multi-map 
+		  (lambda (f01 xyz x012)
+		    (define str012 (number->string x012))
+		    (define arrname (multi-concat f01 '_ xyz str012))
+		    `(begin
+		       ;(dec-local-array double ,arrname 5)
+		       (inner-for-from-to i 0 5
+			 (vector-set! ,arrname i 0)
+			 )
+		       )
+		    )
+		  '(f0 f1 if1 df0 dif1) '(x y z) '(2))
+	       )
+	     (vector-set! if1_x2 0 1)
+	     (vector-set! if1_x2 1 1)
+	     (vector-set! if1_y2 0 1)
+	     (vector-set! if1_y2 1 1)
+	     (vector-set! if1_z2 0 1)
+	     (vector-set! if1_z2 1 1))
+	     ,(begin-map
+		(lambda (x)
+		  (define itgx (concat 'i x))
+		  (define xyz (list->string (list (cadr (string->list (symbol->string x))))))
+		  ;(write x current-error-port) (newline current-error-port)
+		  `(begin 
+		     (define-double ,itgx (>= ,x ,(concat 'Mid xyz)))
+		     )
+		  )
+		'(xx2 xy2 xz2))
+	     ;(LOG_RECORD_INFO "dbg4: [%d %d %d] [%e %e %e]\n" Midx2 Midy2 Midz2 xx2 xy2 xz2)
+	     (begin .
+	     ,(multi-map 
+		(lambda (n xyz x01)
+		  (define st01 (number->string x01))
+		  (define (gen-vec-set f0name noffset)
+		    (define tmpname (multi-concat f0name (number->string n) xyz st01 '_nv_bac))
+		    `(begin
+		       (define-double ,tmpname)
+		       (force-simd-ver
+			 (set! ,tmpname ,(eval (list (concat 'fl (number->string (+ n noffset))) (list 'quote (multi-concat 'r xyz st01))))))) 
+		    )
+
+		  (define i01nst 
+		    (if (< n 3)
+		      (list 'begin
+			(gen-vec-set 'dif1_ 17)
+			(gen-vec-set 'f1_ 4)
+			(gen-vec-set 'if1_ 7))
+		      '()))
+		  (list 'begin
+		    (gen-vec-set 'f0_ 0)
+		    (gen-vec-set 'df0_ 10)
+		    i01nst
+
+		    )
+		  )
+		'(0 1 2 3) '(x y z) '(2)))
+	     (begin . 
+	     ,(multi-map
+		(lambda (n xyz x01)
+		  (define (gen-vec-final f0name nmax default_value)
+		    (define st01 (number->string x01))
+		    ;(define tmpname (multi-concat f0name xyz st01 '_nv_bac))
+		    (define low_value (if (eq? n 0) default_value (multi-concat f0name (number->string (- n 1)) xyz st01 '_nv_bac)))
+		    (define high_value (if (eq? n nmax) 0 (multi-concat f0name (number->string n) xyz st01 '_nv_bac)))
+		    (define vecname (multi-concat f0name xyz st01))
+		    (define the_int (multi-concat 'ix xyz st01))
+		    `(force-simd-ver 
+		      (vector-set! ,vecname ,n (+ (* ,the_int ,low_value) (* (- 1.0 ,the_int) ,high_value))))
+		    )
+		  (define i01nst
+		  (if (< n 4)
+		    (list 'begin
+		      (gen-vec-final 'dif1_ 3 0.0)
+		      (gen-vec-final 'f1_ 3 0.0)
+		      (gen-vec-final 'if1_ 3 1.0)
+		      )
+		    '()
+		    ))
+		  (list 'begin
+		    (gen-vec-final 'f0_ 4 0.0)
+		    (gen-vec-final 'df0_ 4 0.0)
+		    i01nst
+		    )
+		  ) '(0 1 2 3 4) '(x y z) '(2)
+		))
+	     )
+	  )
+	(define (CALL_GEN_VEC var val . isn-genx2)
+	  `(begin 
+	     ,(if (null? isn-genx2) (gen-x2-vec-set) '())
+	     . 
+	     ,(let loop ((n 0) (val val))
+		(cond
+		  ((null? val) '())
+		  (else
+		    (cons
+		      `(begin 
+			 ;(force-simd-ver)
+			 ,(remove-block-return-set! `(vector-ref ,var ,n) `(+ ,(car val) simd_zero))
+			 ;(if (isnormal (vrf ,var ,n)) () (LOG_RECORD_INFO "%s[%d]=%e\n"  ,(symbol->string var) ,n (vrf ,var ,n)))
+			 )
+		      (loop (+ n 1) (cdr val))
+		      )
+		    )
+		  )
+		)
+	     )
+	  )
+	(define (CALL_GEN_VEC_bac var val . isn-genx2)
+	  `(begin 
+	     ,(if (null? isn-genx2) (gen-x2-vec-set) '())
+	     ,(begin 
+		(define vecvars 
+		  (let loop ((n 0) (val val))
+		    (cond
+		      ((null? val) '())
+		      (else
+			(cons
+			  `(vector-ref ,var ,n)
+			  (loop (+ n 1) (cdr val))
+			  )
+			)
+		      )
+		    ))
+		(multi-remove-block-return-set! vecvars val)
+		)
+	     )
+	  )
+	`(block
+	   (define-scalar-double maxerr 0.0)
+	   (define-double RPL00)
+	   (define-double RPL10)
+	   (define-double RPL20)
+	   ;(LOG_RECORD_INFO "mx=%e\n" maxerr)
+	   (dec-array double RES ,numdim)
+	   (dec-array double L_RES ,numdim)
+	   (dec-array double JAC ,numdim-jac)
+	   (dec-array double IJAC ,numdim-jac)
+	   (define-double simd_zero 0.0)
+
+	   ;,(CALL_GEN_VEC 'RES (vector->list res-all))
+	   ;,(CALL_MAXERR 'RES numdim)
+	   ;(define-scalar-int z 0)
+	   ;(LOG_RECORD_DEBUG "dbg3, err=[%.15e %.15e %.15e]\n" (vrf RES 0) (vrf RES 1) (vrf RES 2) )
+	   ;(LOG_RECORD_DEBUG "r2=[%.15e %.15e %.15e]\n" X2 Y2 Z2)
+	   ;(LOG_RECORD_DEBUG "err=%e, z=%d\n" maxerr z)
+	   (inner-for-from-to z 0 ,zmax ;(not (or (< maxerr ,solve-err) (>= z ,zmax))) 0
+	     ;(define-scalar-double s_zmax (reduce fmax maxerr))
+	     ,(CALL_GEN_VEC 'RES (vector->list res-all))
+	     ,(CALL_MAXERR 'RES numdim)
+	     ;(define-scalar-double s_zmax (reduce fmax maxerr))
+	     ;(if z==0 (begin (set! X2 xx0) (set! Y2 xy0)))
+	     ;(LOG_RECORD_INFO "r2=[%e %e %e], err=[%e %e %e], z=%d\n" X2 Y2 Z2 (vrf RES 0) (vrf RES 1) (vrf RES 2) z g ,solve-err)
+	     ;(LOG_RECORD_INFO "r1=[%e %e %e], r0=[%e %e %e], z=%d\n" xx1 xy1 xz1 xx0 xy0 xz0 z g ,solve-err)
+	     (force-scalar-ver (if (< maxerr ,solve-err) break))
+	     ,(CALL_GEN_VEC 'JAC (vector->list jac-all) #f)
+	     ,(CALL_INV_JAC 'IJAC 'JAC numdim)
+	     ;(for-from-to i 0 9 (LOG_RECORD_DEBUG "%.15e " (vrf JAC i))) (LOG_RECORD_DEBUG "\n")
+	     ,(CALL_MAT_MV 'L_RES 'RES 'IJAC numdim)
+	     ,(CALL_VEC_SUB (vector 'X2 'Y2 'Z2) (vector 'X2 'Y2 'Z2) 'L_RES numdim)
+	     ;(incf! z)
+	     ;(if (>= z (- ,zmax 1)) (LOG_RECORD_INFO "Warning: z=%d, maxerr=%e\n" z maxerr))
+	     )
+	   ;(if (not (or (isnormal X2) (== X2 0))) (begin (LOG_RECORD_INFO "r0=[%e %e %e], r1=[%e %e %e] r2=[%e %e %e]\n" X0 Y0 Z0 X1 Y1 Z1 X2 Y2 Z2) (exit 0)))
+	   ;(assert (<= z ,zmax))
+	   ;(if (>= z ,zmax) (LOG_RECORD_INFO "Warning: z=%d, maxerr=%e\n" z maxerr))
+	   ))
+      )
+    (define ret 
+      (lambda (particle_head)
+	`(begin
+	   (if load0
+	     (begin
+	       (define DELTAT Deltat)
+	       (define-double grid_geo_x (/ DELTA_X (* DELTA_Y DELTA_Z)))
+	       (define-double grid_geo_y (/ DELTA_Y (* DELTA_Z DELTA_X)))
+	       (define-double grid_geo_z (/ DELTA_Z (* DELTA_X DELTA_Y)))
+	       ;(define-long __idy )
+	       (define-double XO (vrf xoffset __idy))
+	       ;(define-int Midx (,tflx (vrf ,particle_head 0)))
+	       ;(define-int Midy (,tflx (vrf ,particle_head 1)))
+	       ;(define-int Midz (,tflx (vrf ,particle_head 2)))
+	       (define-int Midx (if use_local_particle_position (,tflx (vrf ,particle_head 0)) mdx))
+	       (define-int Midy (if use_local_particle_position (,tflx (vrf ,particle_head 1)) mdy))
+	       (define-int Midz (if use_local_particle_position (,tflx (vrf ,particle_head 2)) mdz))
+	       (if (< Midx 0) (set! Midx 0))
+	       (if (< Midy 0) (set! Midy 0))
+	       (if (< Midz 0) (set! Midz 0))
+	       (if (> Midx (- XLEN 1)) (set! Midx (- XLEN 1)))
+	       (if (> Midy (- YLEN 1)) (set! Midy (- YLEN 1)))
+	       (if (> Midz (- ZLEN 1)) (set! Midz (- ZLEN 1)))
+
+	       (define-int Bidx (- Midx 2))
+	       (define-int Bidy (- Midy 2))
+	       (define-int Bidz (- Midz 2))
+	       (INIT_ASYNC_IO_LOCK get_sync_id)
+	       (INIT_ASYNC_IO_LOCK get_j_sync_id)
+	       (INIT_ASYNC_IO_LOCK put_sync_id)
+	       ;(define-double QE_MASS (/ Charge0 Mass0))
+	       (define Mass 1.0)
+	       (define Charge (/ Charge0 Mass0) )
+	       (fffor-xyz-from-zero-to 1 5 5
+		 (define-int total_idx (* 3 5 (+ xyzy (* 5 xyzz))))
+		 (parallel-get-memory (+ shE0 total_idx) (+ fieldE  (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		 (parallel-get-memory (+ shB0 total_idx) (+ fieldB  (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		 (parallel-get-memory (+ shB1 total_idx) (+ fieldB1 (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		 ,(if (not (eq? #f cpp-mode))
+		    `(begin
+		       (parallel-get-memory (+ shdB1 total_idx) (+ fielddB1 (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		       (parallel-get-memory (+ shJloop total_idx) (+ FoutJloop (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		       )
+		    '()
+		    )
+		 ,(case use_small_grid 
+		    (#t '())
+		    (2
+		      `(parallel-get-memory (+ shJ0 total_idx) (+ LFoutJ (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0 (* num_ele pscmc_num_compute_units) num_ele) (* num_ele numallgrid pscmc_compute_unit_id)) (* 3 5) get_sync_id)
+		      )
+		    (else
+		      `(parallel-get-memory (+ shJ0 total_idx) (+ FoutJ (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (* 3 5) get_sync_id)
+		      )
+		    )
+		 )
+	       ,(if (eq? use_small_grid #t)
+		  `(parallel-get-memory shJ0 (+ LFoutJ (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz 0 0 375)) 375 get_sync_id) '())
+
+	       ,(if_isgpu
+		  `(begin 
+		     (for-from-to lg 0 375
+		       (vector-set! shJ1 (+  (* lg IDX_LOCAL_XLEN) __idx) 0)
+		       )
+		     ) '())
+	       (WAIT_SPARSE_MEMORY get_sync_id)
+	       (sync-local)
+		 ,(if (not (eq? #f cpp-mode))
+		    `(block
+		       (define i 0)
+		       (for (set! i 0) (< (+ i __idx) 125) (incf! i __xlen)
+			 (define-int real_index (+ i __idx))
+			 (define-double Bx (vrf shB1 (+ (* real_index 3) 0)))
+			 (define-double By (vrf shB1 (+ (* real_index 3) 1)))
+			 (define-double Bz (vrf shB1 (+ (* real_index 3) 2)))
+			 (set! (vrf shabsB1 real_index) (sqrt (+ (* Bx Bx) (* By By) (* Bz Bz))))
+			 )
+		       )
+		    '()
+		    )
+	       (sync-local)
+	       (for-from-zero-to-cache-opt ((,particle_head local_particle_head double ,PARTICLE_LEN ,PARTICLE_LEN) (a_f double 3 0)) ,PAR_CACHE_LEN g load0
+		 (begin
+
+		   (define-double vx0 (vrf local_particle_head g 3))
+		   (define-double vy0 (vrf local_particle_head g 4))
+		   (define-double vz0 (vrf local_particle_head g 5))
+		   ,(if (not (eq? cpp-mode #f))
+		      `(define-double Mu (vrf local_particle_head g 6))
+		      '()
+		      )
+		   (define-double xx1 (- (vrf local_particle_head g 0) 0.5))
+		   (define-double xy1 (- (vrf local_particle_head g 1) 0.5))
+		   (define-double xz1 (- (vrf local_particle_head g 2) 0.5))
+		   (force-simd-ver
+		     (define-double xx0 (- xx1 (* Deltat vx0)))
+		     (define-double xy0 (- xy1 (* Deltat vy0)))
+		     (define-double xz0 (- xz1 (* Deltat vz0)))
+		     ;(if (> vx0 0.2) (LOG_RECORD_INFO "x=[%e %e %e],vx=[%e %e %e]\n" ))
+		     ;(dec-local-array double a_f ,PAR_CACHE_LEN 3)
+		     ;(if (> vx0 0.2) (LOG_RECORD_INFO "x=[%e %e %e],vx=[%e %e %e]\n" ))
+		     (define-double Midx0 (,tflx xx0))
+		     (define-double Midy0 (,tflx xy0))
+		     (define-double Midz0 (,tflx xz0))
+		     (define-double Midx1 (,tflx xx1))
+		     (define-double Midy1 (,tflx xy1))
+		     (define-double Midz1 (,tflx xz1))
+		     (define rx0 (- xx0 Midx0))
+		     (define ry0 (- xy0 Midy0))
+		     (define rz0 (- xz0 Midz0))
+		     (define rx1 (- xx1 Midx1))
+		     (define ry1 (- xy1 Midy1))
+		     (define rz1 (- xz1 Midz1))
+		     (define X0 xx0)
+		     (define X1 xx1)
+		     (define Y0 xy0)
+		     (define Y1 xy1)
+		     (define Z0 xz0)
+		     (define Z1 xz1))
+		   (begin
+		     (begin .
+		       ,(multi-map 
+			  (lambda (f01 xyz x012)
+			    (define str012 (number->string x012))
+			    (define arrname (multi-concat f01 '_ xyz str012))
+			    ;`(pure-text ,(multi-concat "\n double " arrname "[5]={0};\n"))
+			    `(begin (dec-array double ,arrname 5) (inner-for-from-to i 0 5 (vector-set! ,arrname i 0)))
+			    )
+			  '(f0 f1 if1) '(x y z) '(0 1))
+		       )
+		     ,(begin-map
+			(lambda (x)
+			  (define itgx (concat 'i x))
+			  (define xyz (list->string (list (cadr (string->list (symbol->string x))))))
+			  ;(write x current-error-port) (newline current-error-port)
+			  `(begin 
+			     (define-int ,itgx (if (>= ,x ,(concat 'Mid xyz)) 1 0))
+			     )
+			  )
+			'(xx0 xy0 xz0 xx1 xy1 xz1))
+		     (begin .
+		       ,(multi-map 
+			  (lambda (xyz st01)
+			    `(begin
+			       (vector-set! ,(multi-concat 'if1_ xyz (number->string st01)) 0 1)
+			       (vector-set! ,(multi-concat 'if1_ xyz (number->string st01)) 1 1)
+			       )
+			    )
+			  '(x y z) '(0 1)
+			  ))
+		     (begin .
+		       ,(multi-map 
+			  (lambda (n xyz x01)
+			    (define st01 (number->string x01))
+			    (define (gen-vec-set f0name noffset)
+			      `(vector-set! ,(multi-concat f0name xyz st01) (+ ,n ,(multi-concat 'ix xyz st01)) ,(eval (list (concat 'fl (number->string (+ n noffset))) (list 'quote (multi-concat 'r xyz st01)))))
+			      )
+			    (define i01nst 
+			      (if (< n 3)
+				(begin
+				  (list 'begin
+				    (gen-vec-set 'f1_ 4)
+				    (gen-vec-set 'if1_ 7)))
+				'()))
+			    (list 'begin
+			      (gen-vec-set 'f0_ 0)
+			      ;(gen-vec-set 'df0_ 10)
+			      i01nst
+			      )
+			    )
+			  '(0 1 2 3) '(x y z) '(0 1))
+		       )
+		     (define-double Ex1) 
+		     (get-E1 0 Ex1)
+		     (define-double Ey1)
+		     (get-E1 1 Ey1)
+		     (define-double Ez1)
+		     (get-E1 2 Ez1)
+		     ,(if (not (eq? #f cpp-mode))
+			`(begin
+			   (define-double dBx1)
+			   (get-E1 0 dBx1 shdB1)
+			   (define-double dBy1)
+			   (get-E1 1 dBy1 shdB1)
+			   (define-double dBz1)
+			   (get-E1 2 dBz1 shdB1)
+			   )
+			'()
+			)
+		     ;(force-scalar-ver (pure-text "\nstatic int i0=0;\n"))
+		     ;(define-scalar-static-int i0 0)
+		     (define-double res_0)
+		     (define-double res_1)
+		     (define-double res_2)
+		     ,(remove-block-return-set! 'res_0 (eval '(flr1 0)))
+		     ,(remove-block-return-set! 'res_1 (eval '(flr6 0)))
+		     ,(remove-block-return-set! 'res_2 (eval '(flr11 0)))
+		     ;,(remove-block-return-set! `(vrf a_f (remainder g ,PAR_CACHE_LEN) 0) )
+		     ;,(remove-block-return-set! `(vrf a_f (remainder g ,PAR_CACHE_LEN) 1) (eval '(flr6 0)))
+		     ;,(remove-block-return-set! `(vrf a_f (remainder g ,PAR_CACHE_LEN) 2) (eval '(flr11 0)))
+		     ;(if Tori_X0 (begin (fprintf stderr "Ra=[%.15e %.15e %.15e]\n" (vrf a_f 0 0) (vrf a_f 0 1) (vrf a_f 0 2)) (fprintf stderr "Ea=[%.15e %.15e %.15e]\n" Ex1 Ey1 Ez1) (fprintf stderr "Es=[%e %e %e %e %e]\n" (vrf f1_x1 0) (vrf f1_x1 1) (vrf f1_x1 2) (vrf f1_x1 3) (vrf f1_x1 4)) (fprintf stderr "X1=[%e %e %e]\n" X1 Y1 Z1) ))
+		     ;(incf! i0)
+		     ;(if (> i0 2) (exit 0))
+		     ) 
+
+		   (define X2 (- (* 2 xx1) xx0))
+		   (define Y2 (- (* 2 xy1) xy0))
+		   (define Z2 (- (* 2 xz1) xz0)) 
+		   (begin .
+		     ,(multi-map 
+			(lambda (f01 xyz x012)
+			  (define str012 (number->string x012))
+			  (define arrname (multi-concat f01 '_ xyz str012))
+			  ;`(pure-text ,(multi-concat "\n double " arrname "[5]={0};\n"))
+			  `(begin (dec-array double ,arrname 5) (inner-for-from-to i 0 5 (vector-set! ,arrname i 0)))
+			  )
+			'(f0 f1 if1 df0 dif1) '(x y z) '(2))
+		     )
+		   (block
+		     ,(begin-map
+			(lambda (x)
+			  (define itgx (concat 'i x))
+			  (define xyz (list->string (list (cadr (string->list (symbol->string x))))))
+			  ;(write x current-error-port) (newline current-error-port)
+			  `(begin 
+			     (define-int ,itgx (if (>= ,x ,(concat 'Mid xyz)) 1 0))
+			     )
+			  )
+			'(xx0 xy0 xz0 xx1 xy1 xz1)))
+		   (begin .  ,(multi-map (lambda (xyz st01) `(begin (vector-set! ,(multi-concat 'if1_ xyz (number->string st01)) 0 1) (vector-set! ,(multi-concat 'if1_ xyz (number->string st01)) 1 1))) '(x y z) '(1)))
+		   (begin .  
+		     ,(multi-map 
+			(lambda (n xyz x01) 
+			  (define st01 (number->string x01)) 
+			  (define (gen-vec-set f0name noffset) 
+			    `(vector-set! ,(multi-concat f0name xyz st01)
+			       (+ ,n ,(multi-concat 'ix xyz st01)) 
+			       ,(eval (list (concat 'fl (number->string (+ n noffset))) (list 'quote (multi-concat 'r xyz st01))))))
+			  (define i01nst 
+			    (if (< n 3)
+			      (begin 
+				(list 'begin 
+				  (gen-vec-set 'f1_ 4)
+				  (gen-vec-set 'if1_ 7)
+				  )) 
+			      '())) 
+			  (list 'begin (gen-vec-set 'f0_ 0) i01nst)) 
+			'(0 1 2 3) '(x y z) '(1)))
+		   ;(LOG_RECORD_DEBUG "res=%e %e %e\n" (vrf a_f g 0) (vrf a_f g 1) (vrf a_f g 2))
+		   ,(begin
+		      (begin 
+			(define lhs-all (vector (flr0 0) (flr5 0) (flr10 0))) 
+			(define res-all-lst (map (lambda (x y) `(+ ,x ,y)) (vector->list lhs-all) '(res_0 res_1 res_2))) 
+			(define jac-all (vector (flr2 0) (flr3 0) (flr4 0) (flr7 0) (flr8 0) (flr9 0) (flr12 0) (flr13 0) (flr14 0)))
+			)
+		      (gen-newton (list->vector '(X2 Y2 Z2)) (list->vector res-all-lst) jac-all 32 'Solve_Err)
+		      )
+		   ,(if use-push-par
+		      `(begin
+			 (vector-set! (vrf local_particle_head g) 0 (+ X2 0.5))
+			 (vector-set! (vrf local_particle_head g) 1 (+ Y2 0.5))
+			 (vector-set! (vrf local_particle_head g) 2 (+ Z2 0.5))
+			 (vector-set! (vrf local_particle_head g) 3 (/ (- X2 xx1) Deltat))
+			 (vector-set! (vrf local_particle_head g) 4 (/ (- Y2 xy1) Deltat))
+			 (vector-set! (vrf local_particle_head g) 5 (/ (- Z2 xz1) Deltat)))
+		      '()
+		      )
+		   (block 
+		     (fffor-xyz-from-zero-to 5 5 5 
+		       (declare-scalar-int (allidx (+ xyzx (* 5 (+ xyzy (* 5 xyzz)))))) 
+		       ;(if (and xyzx==1 xyzy==1 xyzz==1) (begin (LOG_RECORD_DEBUG "out=%ld\n" (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz 0 0 375)) (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz 0 0 375))) 
+		       ,(addJ use_small_grid)
+		       )
+		     )
+		   )
+		 ()
+		 )
+
+	       ,(if_isgpu
+		  `(block
+		     (define lg 0)
+		     (sync-local)
+		     (for lg=0  (< (+ lg __idx) 375) (incf! lg __xlen)
+		       (define-double inctmp 0)
+		       (inner-for-from-to i 0 IDX_LOCAL_XLEN
+			 (incf! inctmp (vector-ref shJ1 (+ (* (+ lg __idx) IDX_LOCAL_XLEN) i))))
+		       (incf! (vrf shJ0 (+ lg __idx)) inctmp)
+		       )
+		     (sync-local)
+		     )
+		  '()
+		  )
+	       ,(case use_small_grid
+		  (#t
+		    `(parallel-put-memory (+ LFoutJ (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz 0 0 375)) shJ0 375))
+		  (else
+		    `(begin 
+		       (fffor-xyz-from-zero-to 1 5 5 
+			 (define-int total_idx (* 3 5 (+ xyzy (* 5 xyzz)))) 
+			 ,(case use_small_grid
+			    (2
+			      `(parallel-put-memory (+ LFoutJ (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0 (* num_ele pscmc_num_compute_units) num_ele) (* num_ele numallgrid pscmc_compute_unit_id)) (+ shJ0 total_idx) (* 3 5) put_sync_id)
+			      )
+			    (else
+			      `(parallel-put-memory (+ FoutJ (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ xyzy Bidy) (+ xyzz Bidz) 0 0)) (+ shJ0 total_idx) (* 3 5) put_sync_id)
+			      )))
+		       (WAIT_SPARSE_MEMORY put_sync_id)))
+		  )
+	       (sync-local)
+	       ;(LOG_RECORD_DEBUG "bug=%e\n" (vrf LFoutJ 27951))
+	       ;(WAIT_SPARSE_MEMORY put_sync_id)
+	       )
+	     )
+	   )
+	))
+    (set! PARTICLE_LEN tmp_parlen)
+    ret
+    ))
+(define-scmc-global inshJ0 
+  (lambda (vidx l use_small_grid)
+    (case use_small_grid
+      (#t
+	(if_isgpu
+	  `(vector-ref shJ1 (+ (* (+ ,vidx (* ,l 125)) IDX_LOCAL_XLEN) __idx))
+	  `(vector-ref shJ0 (+ ,vidx (* ,l 125)))
+	  ))
+      (else
+	(if_isgpu
+	  `(vector-ref shJ1 (+ (* (+ (* 3 ,vidx) ,l) IDX_LOCAL_XLEN) __idx))
+	  `(vector-ref shJ0 (+  (* 3 ,vidx) ,l))
+	  ))
+
+      )
+    )
+  )
+(define-scmc-global gen-defJ01 
+  (lambda (use-cpp)
+    (lambda () 
+      `(begin
+	 (dec-local_shared-array double shB0 375)
+	 (dec-local_shared-array double shB1 375)
+	 (dec-local_shared-array double shE0 375)
+	 (dec-local_shared-array double shJ0 375)
+	 ,(if use-cpp
+	    `(begin
+	       (dec-local_shared-array double shJloop 375)
+	       (dec-local_shared-array double shdB1 375)
+	       (dec-local_shared-array double shabsB1 125)
+	       )
+	    '()
+	    )
+	 ,(if_isgpu
+	    `(begin 
+	       (dec-local_shared-array double shJ1 (* IDX_LOCAL_XLEN 375))
+	       ) '())
+	 )
+      )))
+(define-scmc-global defJ01 (gen-defJ01 #f))
+(define-scmc-global defJ01-cpp (gen-defJ01 #t))
+(define-scmc-global generate_incfJ01_2nd_midp
+  (lambda (numt)
+    (define numts (number->string numt))
+    (define numts0 (number->string (- numt 1)))
+    `(force-simd-ver
+       (incf! Jx (* grid_geo_x (- (vrf ,(concat 'if1_x numts) xyzx) (vrf ,(concat 'if1_x numts0) xyzx)) (vrf ,(concat 'f0_y numts0) xyzy) (vrf ,(concat 'f0_z numts0) xyzz)))
+       (incf! Jy (* grid_geo_y (- (vrf ,(concat 'if1_y numts) xyzy) (vrf ,(concat 'if1_y numts0) xyzy)) (vrf ,(concat 'f0_x numts) xyzx) (vrf ,(concat 'f0_z numts0) xyzz)))
+       (incf! Jz (* grid_geo_z (- (vrf ,(concat 'if1_z numts) xyzz) (vrf ,(concat 'if1_z numts0) xyzz)) (vrf ,(concat 'f0_x numts) xyzx) (vrf ,(concat 'f0_y numts) xyzy)))
+       (incf! Jx (* grid_geo_x (- (vrf ,(concat 'if1_x numts) xyzx) (vrf ,(concat 'if1_x numts0) xyzx)) (vrf ,(concat 'f0_y numts) xyzy) (vrf ,(concat 'f0_z numts) xyzz)))
+       (incf! Jy (* grid_geo_y (- (vrf ,(concat 'if1_y numts) xyzy) (vrf ,(concat 'if1_y numts0) xyzy)) (vrf ,(concat 'f0_x numts0) xyzx) (vrf ,(concat 'f0_z numts) xyzz)))
+       (incf! Jz (* grid_geo_z (- (vrf ,(concat 'if1_z numts) xyzz) (vrf ,(concat 'if1_z numts0) xyzz)) (vrf ,(concat 'f0_x numts0) xyzx) (vrf ,(concat 'f0_y numts0) xyzy)))
+       )
+    )
+  )
+(define-scmc-global generate_incfJ0_torislab_2nd
+  (lambda (use-tori use-midp)
+    (multi-define geox geoy geoz (if use-tori `((/ Tori_X0 (+ Tori_X0 XO Bidx xyzx)) (/ (+ Tori_X0 XO Bidx xyzx) Tori_X0) (/ Tori_X0 (+ Tori_X0 XO Bidx xyzx))) '(1 1 1)))
+    (define rat (if use-midp 0.25 0.5))
+    (lambda (use_small_grid)
+    `(begin
+       (define-double Jx 0) 
+       (define-double Jy 0) 
+       (define-double Jz 0) 
+       ,(generate_incfJ01_2nd_midp 2)
+       ,(if use-midp (generate_incfJ01_2nd_midp 1) '())
+       (incf! ,(inshJ0 'allidx 0 use_small_grid) (* ,rat ,geox Charge0 (reduce + Jx))) 
+       (incf! ,(inshJ0 'allidx 1 use_small_grid) (* ,rat ,geoy Charge0 (reduce + Jy))) 
+       (incf! ,(inshJ0 'allidx 2 use_small_grid) (* ,rat ,geoz Charge0 (reduce + Jz))) 
+       )
+    )
+    )
+  )
+(define-scmc-global INCFJ0_TORI2ND
+  (generate_incfJ0_torislab_2nd #t #f)
+  )
+(define-scmc-global INCFJ0_SLAB2ND
+  (generate_incfJ0_torislab_2nd #f #f)
+  )
+(define-scmc-global INCFJ0_TREL_FWD 
+  (lambda (use_small_grid)
+  `(begin
+     (define-double Jx) 
+     (define-double Jy) 
+     (define-double Jz) 
+     (force-simd-ver
+       (set! Jx (* grid_geo_x (- (vrf if1_x2 xyzx) (vrf if1_x1 xyzx)) (vrf f0_y1 xyzy) (vrf f0_z1 xyzz)))
+       (set! Jy (* grid_geo_y (- (vrf if1_y2 xyzy) (vrf if1_y1 xyzy)) (vrf f0_x2 xyzx) (vrf f0_z1 xyzz)))
+       (set! Jz (* grid_geo_z (- (vrf if1_z2 xyzz) (vrf if1_z1 xyzz)) (vrf f0_x2 xyzx) (vrf f0_y2 xyzy))))
+     (incf! ,(inshJ0 'allidx 0 use_small_grid) (* (/ Tori_X0 (+ Tori_X0 XO Bidx xyzx)) Charge0 (reduce + Jx))) 
+     (incf! ,(inshJ0 'allidx 1 use_small_grid) (* (/ (+ Tori_X0 XO Bidx xyzx) Tori_X0) Charge0 (reduce + Jy))) 
+     (incf! ,(inshJ0 'allidx 2 use_small_grid) (* (/ Tori_X0 (+ Tori_X0 XO Bidx xyzx)) Charge0 (reduce + Jz))) 
+     ))
+  )
+(define-scmc-global INCFJ0_TREL_BWD
+  (lambda (use_small_grid)
+  `(begin
+     (define-double Jx (* grid_geo_x (- (vrf if1_x2 xyzx) (vrf if1_x1 xyzx)) (vrf f0_y2 xyzy) (vrf f0_z2 xyzz))) 
+     (incf! ,(inshJ0 'allidx 0 use_small_grid) (* (/ Tori_X0 (+ Tori_X0 XO Bidx xyzx)) Charge0 (reduce + Jx))) 
+     (define-double Jy (* grid_geo_y (- (vrf if1_y2 xyzy) (vrf if1_y1 xyzy)) (vrf f0_x1 xyzx) (vrf f0_z2 xyzz))) 
+     (incf! ,(inshJ0 'allidx 1 use_small_grid) (* (/ (+ Tori_X0 XO Bidx xyzx) Tori_X0) Charge0 (reduce + Jy))) 
+     (define-double Jz (* grid_geo_z (- (vrf if1_z2 xyzz) (vrf if1_z1 xyzz)) (vrf f0_x1 xyzx) (vrf f0_y1 xyzy))) 
+     (incf! ,(inshJ0 'allidx 2 use_small_grid) (* (/ Tori_X0 (+ Tori_X0 XO Bidx xyzx)) Charge0 (reduce + Jz))) 
+     ))
+  )
+(define-scmc-global INCFJ0_RELNG
+  (lambda (use_small_grid)
+    `(begin
+       (define-double Jx) 
+       (define-double Jy) 
+       (define-double Jz) 
+       (force-simd-ver
+	 (set! Jx (* grid_geo_x (- (vrf if1_x2 xyzx) (vrf if1_x1 xyzx)) (vrf f0_y1 xyzy) (vrf f0_z1 xyzz)))
+	 (set! Jy (* grid_geo_y (- (vrf if1_y2 xyzy) (vrf if1_y1 xyzy)) (vrf f0_x2 xyzx) (vrf f0_z1 xyzz)))
+	 (set! Jz (* grid_geo_z (- (vrf if1_z2 xyzz) (vrf if1_z1 xyzz)) (vrf f0_x2 xyzx) (vrf f0_y2 xyzy))))
+       (incf! ,(inshJ0 'allidx 0 use_small_grid) (* Charge0 (reduce + Jx))) 
+       (incf! ,(inshJ0 'allidx 1 use_small_grid) (* Charge0 (reduce + Jy)))
+       (incf! ,(inshJ0 'allidx 2 use_small_grid) (* Charge0 (reduce + Jz))))
+    )
+  )
+;(defmacro regather-err-particle )
+(define-scmc-global use-goto-kernel #t)
+(define-scmc-global num-call-stack 4)
+(define-scmc-global num_lab 0)
+(define-scmc-global gen-genpushkernel 
+  (lambda (use-smallgrid sort_fun use-grid)
+    (define pre_def (lambda x '()))
+    (define sort_cu (lambda x '()))
+    (define sort_grid (lambda x '()))
+    (if (pair? sort_fun)
+      (begin
+	(set! pre_def (car sort_fun))
+	(set! sort_cu (cadr sort_fun))
+	(set! sort_grid (caddr sort_fun))
+	(set! sort_fun #t)
+	)
+      (set! sort_fun #f)
+      )
+    (lambda (name vars gen_core_fun gen_prev_dec_fun . __xlen)
+      (define k_header '(defkernel))
+      (define aft_call_fun (lambda () '()))
+      (if (null? __xlen)
+	0
+	(begin
+	  (define carxlen (car __xlen))
+	  (if (number? carxlen)
+	    (set! k_header `(defkernel-with-xlen ,carxlen))
+	    0
+	    )
+	  (if (pair? (cdr __xlen))
+	    (set! aft_call_fun (cadr __xlen))
+	    0
+	    )
+	  )
+	)
+      (define (gen-lab)
+	(set! num_lab (+ num_lab 1))
+	(concat 'LAB_TMP (number->string num_lab))
+	)
+
+      (define (CALL lab)
+	(define thelab (gen-lab))
+	`(begin 
+	   ;(set! (vector-ref call_stack_pointer cur_frame_num) ("&" ("&" ,thelab)))
+	   (pure-text ,(multi-concat "\n\t call_stack_pointer[cur_frame_num]=&&" thelab ";\n"))
+	   (incf! cur_frame_num)
+	   (goto ,lab)
+	   (pure-text "\n")
+	   (label ,thelab)
+	   )
+	)
+
+      (define (RET)
+	`(begin
+	   (incf! cur_frame_num -1)
+	   (goto (* (vector-ref call_stack_pointer cur_frame_num)))
+	   )
+	)
+
+      (define local-use-goto-kernel (and use-goto-kernel (isinlst RUNTIME '(C OpenMP COI SWMC)) use-grid))
+      (append k_header
+	`(,(if use-smallgrid (concat name '_small_grids) name) ,vars 
+	   ,(if local-use-goto-kernel 
+	      `(begin 
+		 (dec-local-array void* call_stack_pointer ,num-call-stack)
+		 (define-int cur_frame_num 0)
+		 ) '())
+	   (define numgrid (* XLEN YLEN ZLEN))
+	   (define numallgrid (* (+ XLEN ovlp ovlp) (+ YLEN ovlp ovlp) (+ ZLEN ovlp ovlp)))
+	   (define blk_len (* numallgrid num_ele))
+	   (define blk_len_x (+ XLEN ovlp ovlp))
+	   (define blk_len_y (+ YLEN ovlp ovlp))
+	   (define blk_len_z (+ ZLEN ovlp ovlp))
+	   (define-long numgrid_cu (* numgrid numvec))
+	   ;(define-static-int dbg_state)
+	   (define-long grid_base_offset (* __idy numgrid grid_cache_len ,PARTICLE_LEN))
+	   (INIT_ASYNC_IO_LOCK cuload_id)
+	   (INIT_ASYNC_IO_LOCK get_sync_block_id)
+	   (define-int cu_load (vector-ref cu_xyzw (* 4 __idy)))
+	   ,(pre_def)
+	   ;(GET_CONT_MEMORY ("&" cu_load) (+ cu_xyzw (* 4 __idy)) 1)
+	   (define-int call_sort 1)
+	   (define-int cr_allgid 0)
+	   (define-int use_local_particle_position 1)
+	   (declare-int mdx mdy mdz)
+	   ,(gen_prev_dec_fun)
+	   ,(if local-use-goto-kernel 
+	      `(begin 
+		 (define-double* particle_head_general)
+		 (define-int load0)
+		 (define-int new_load)
+		 (define-int global_idy_tmp)
+		 ;(define-int cudbg 0)
+		 (goto beg_prog)
+		 (label core_fun)
+		 (block
+		   (define __idy global_idy_tmp)
+		   ,(gen_core_fun 'particle_head_general sort_fun RET))
+		 ,(RET)
+		 (label beg_prog)
+		 0
+		 ) '())
+	   ,(if use-smallgrid '(define-long allgid __idy) '())
+	   ;(define-int new_l1)
+	   ,(append 
+	      (if use-smallgrid `(for 0 (< allgid numvec) (incf! allgid __ylen) (define-int cu_load (vector-ref cu_xyzw (* 4 allgid)))) '(begin))
+	      (list 
+		(if use-grid
+		  `(for-from-to l1 0 cu_load
+		     ,(if use-smallgrid `(define __idy allgid) '())
+		     ,(if local-use-goto-kernel
+			`(begin
+			   (set! load0 1)
+			   (set! use_local_particle_position 1)
+			   (set! particle_head_general (+ cu_cache (* __idy ,PARTICLE_LEN cu_cache_length) (* l1 ,PARTICLE_LEN)))
+			   ;(set! (vrf particle_head_general 0) (if (< particle_head_general)))
+			   (set! new_load load0)
+			   ;(set! cudbg 1)
+			   ;(set! cr_allgid allgid)
+			   (set! call_sort 0)
+			   (set! global_idy_tmp __idy)
+			   ,(CALL 'core_fun)
+			   0
+			   )
+			`(begin 
+			   (define load0 1)
+			   (define new_load load0)
+			   (define global_idy_tmp __idy)
+			   (set! use_local_particle_position 1)
+			   ,(gen_core_fun `(+ cu_cache (* ,(if use-smallgrid 'allgid '__idy) ,PARTICLE_LEN cu_cache_length) (* l1 ,PARTICLE_LEN)) #f)))
+		     )
+		  `(block  
+		     (define-long load0 cu_load)
+		     (define global_idy_tmp __idy)
+		     (set! use_local_particle_position 1)
+		     ,(gen_core_fun `(+ cu_cache (* __idy ,PARTICLE_LEN cu_cache_length)) #f)))
+		))
+	   ;,(if (eq? sort_fun #f) '())
+	   ,(sort_cu)
+
+	   ,(if use-grid 
+	      `(begin
+		 ,(if use-smallgrid `(set! allgid __idy) '())
+		 ,(append 
+		    (if use-smallgrid 
+		      `(for 0 (< allgid numgrid_cu) (incf! allgid __ylen) 
+			 (define new_load_tmp (vrf xyzw (* 4 allgid)))
+			 (define-long __idy (/ allgid numgrid))
+			 (define-long c_gid (remainder allgid numgrid))
+			 )
+		      `(for-from-to allgid 0 numgrid
+			 (define new_load_tmp (vrf xyzw (* 4 (+ (* __idy numgrid) allgid))))
+			 (define-long c_gid allgid)
+			 )
+		      ) 
+		    `(
+		       (set! cr_allgid allgid)
+		       (set! use_local_particle_position 0)
+		       (set! mdx (remainder c_gid XLEN))
+		       (set! mdy (remainder (/ c_gid XLEN) YLEN))
+		       (set! mdz (/ c_gid (* XLEN YLEN)))
+		       ;(LOG_RECORD_INFO "mdr=[%d %d %d] load0=%d\n" mdx mdy mdz new_load_tmp)
+		       )
+		    (if local-use-goto-kernel
+		      `(
+			 (set! load0 new_load_tmp)
+			 (set! call_sort ,(if sort_fun 1 0))
+			 (set! particle_head_general (+ inoutput ,(if use-smallgrid 0 'grid_base_offset) (* ,PARTICLE_LEN allgid grid_cache_len)))
+			 ,(if (and USE_PREFETCH (isinlst RUNTIME '(C COI OpenMP))) 
+			    `(__builtin_prefetch particle_head_general)
+			    '()
+			    )
+			 (set! new_load load0)
+			 (set! global_idy_tmp __idy)
+			 ,(CALL 'core_fun)
+			 0
+			 )
+		      `(
+			 (define load0 new_load_tmp)
+			 (define new_load new_load_tmp)
+			 ;(define load0 1)
+			 (define global_idy_tmp __idy)
+			 ,(gen_core_fun `(+ inoutput ,(if use-smallgrid 0 'grid_base_offset) (* ,PARTICLE_LEN allgid grid_cache_len)) sort_fun)))
+		    `(
+		       ,(sort_grid)
+		       (if (neq? load0 new_load)
+			 (set! (vrf xyzw (* 4 (+ ,(if use-smallgrid 0 `(* __idy numgrid)) allgid))) new_load)
+			 ))
+		    ))
+	      '()
+	      )
+	   ,(aft_call_fun)
+	   ))
+      )
+    )
+  )
+
+(define-scmc-global gen_push_kernel (gen-genpushkernel #f #f #t))
+(define-scmc-global gen_push_kernel_small_grids (gen-genpushkernel #t #f #t))
+(define-scmc-global gen_push_kernel_nogrid (gen-genpushkernel #f #f #f))
+
+(defmacro GET_FIELD_ELEMENT_ID_KERNEL (xyzx xyzy xyzz l dir . fieldlen)
+  (define fieldlen2 'num_ele)
+  (if (null? fieldlen) 
+    (set! fieldlen 'num_ele) 
+    (begin
+	(if (null? (cdr fieldlen))
+	  (set! fieldlen2 (car fieldlen))
+	  (set! fieldlen2 (cadr fieldlen))
+	  )
+	(set! fieldlen (car fieldlen))
+	))
+  (multi-define xb yb zb '((+ XLEN (* 2 ovlp)) (+ YLEN (* 2 ovlp)) (+ ZLEN (* 2 ovlp))))
+  (define xyzvec (vector xyzx xyzy xyzz xyzx xyzy xyzz))
+  (if (not (number? dir)) (begin (write `(Error dir = ,dir is not a number) current-error-port)) 0)
+  (define axyzx (vector-ref xyzvec (- 3 dir)))
+  (define axyzy (vector-ref xyzvec (- 4 dir)))
+  (define axyzz (vector-ref xyzvec (- 5 dir)))
+  `(+ (* ,fieldlen (* __idy ,xb ,yb ,zb)) (GET_IDXYZL (+ ,axyzx ovlp) (+ ,axyzy ovlp) (+ ,axyzz ovlp) ,l ,fieldlen2 ,xb ,yb ,zb))
+  )
+(defmacro gen_EB-proc (B0 xyz_num)
+  `(block
+     (declare-double (sum0 0.0))
+     (fffor-xyz-from-zero-to 4 4 4
+       (declare-int (allidx (+ xyzx (* 4 (+ xyzy (* 4 xyzz))))))
+       (incf! sum0 
+	 (* (vrf ,B0 (+ (* allidx 3) ,xyz_num))
+	   (vrf f_x_arr xyzx) (vrf f_y_arr xyzy) (vrf f_z_arr xyzz)
+	   )
+	 )
+       )
+     sum0
+     )
+  )
+(define-scmc-global gen_split_pass_calc_grid 
+  (lambda (particle_head num_particle name By_shared_mem Bz_shared_mem Jx_shared_mem E_thread B_thread J_thread use_small_grid use-vec use-presort . use_nopush)  ;here __idx is treated as a simd component
+    (define nopush (if (null? use_nopush) #f (car use_nopush)))
+    (define rx 'rx)
+    (define ry 'ry)
+    (define rz 'rz)
+    (define numdir 0)
+    (define ynum 1)
+    (define znum 2)
+    (define Bidx 'Bidx)
+    (define Bidy 'Bidy)
+    (define Bidz 'Bidz)
+    (define rBidx 'Bidx)
+    (define rBidy 'Bidy)
+    (define rBidz 'Bidz)
+    (define xyzx 'x)
+    (define xyzy 'y)
+    (define xyzz 'z)
+    (define curname 'x)
+    (case name
+      ('x (set! rx 'rx) (set! ry 'ry) (set! rz 'rz))
+      ('y 
+	(set! rx 'rz) (set! ry 'rx) (set! rz 'ry)
+	(set! numdir 1) (set! ynum 2) (set! znum 0)
+	(set! Bidx 'Bidy) (set! Bidy 'Bidz) (set! Bidz 'Bidx)
+	(set! rBidx 'Bidz) (set! rBidy 'Bidx) (set! rBidz 'Bidy)
+	(set! curname 'y)
+	)
+      ('z 
+	(set! rx 'ry) (set! ry 'rz) (set! rz 'rx) 
+	(set! numdir 2) (set! ynum 0) (set! znum 1)
+	(set! Bidx 'Bidz) (set! Bidy 'Bidx) (set! Bidz 'Bidy)
+	(set! rBidx 'Bidy) (set! rBidy 'Bidz) (set! rBidz 'Bidx)
+	(set! curname 'z)
+	)
+      (else 0)
+      )
+    (define (gen_get_particle_data cur_idx)
+      (cons 'begin
+      (let loop ((n 0) (xvs '(xx xy xz)))
+	(cond
+	  ((null? xvs) '())
+	  (else
+	    (cons `(define-double ,(car xvs) (vrf ,particle_head (+ ,n (* ,cur_idx ,PARTICLE_LEN))))
+	      (loop (+ n 1) (cdr xvs))
+	      )
+	    )
+	  )
+	))
+      )
+
+    (define Byxyzvec #(5 4 3 5 4 3))
+    (define Bzxyzvec #(5 3 4 5 3 4))
+    (define Jxxyzvec #(5 4 4 5 4 4))
+    (define TBy_vec #(0 iy iz 0 iy iz))
+    (define By_idx (vector-ref TBy_vec (+ numdir 0))) ;Bz_id[xyz]=By_id[xyz]=Jx_id[xyz]
+    (define By_idy (vector-ref TBy_vec (+ numdir 1)))
+    (define By_idz (vector-ref TBy_vec (+ numdir 2)))
+    (define By_blk_ix (vector-ref #(1 3 12) numdir))
+    (define By_blk_iy (vector-ref #(5 15 1) numdir))
+    (define By_blk_iz (vector-ref #(20 1 4) numdir))
+
+    (define Bz_blk_ix (vector-ref #(1 4 12) numdir))
+    (define Bz_blk_iy (vector-ref #(15 1 3) numdir))
+    (define Bz_blk_iz (vector-ref #(5 20 1) numdir))
+
+    (define Jx_blk_ix (vector-ref #(1 4 16) numdir))
+    (define Jx_blk_iy (vector-ref #(5 20 1) numdir))
+    (define Jx_blk_iz (vector-ref #(20 1 4) numdir))
+
+    (define Byxm (vector-ref Byxyzvec (- 3 numdir)))
+    (define Byym (vector-ref Byxyzvec (- 4 numdir)))
+    (define Byzm (vector-ref Byxyzvec (- 5 numdir)))
+    (define Bzxm (vector-ref Bzxyzvec (- 3 numdir)))
+    (define Bzym (vector-ref Bzxyzvec (- 4 numdir)))
+    (define Bzzm (vector-ref Bzxyzvec (- 5 numdir)))
+    (define Jxxm (vector-ref Jxxyzvec (- 3 numdir)))
+    (define Jxym (vector-ref Jxxyzvec (- 4 numdir)))
+    (define Jxzm (vector-ref Jxxyzvec (- 5 numdir)))
+    (define delta_l (vector-ref #(DELTA_X DELTA_Y DELTA_Z) numdir))
+    (define delta_ly (vector-ref #(DELTA_X DELTA_Y DELTA_Z) ynum))
+    (define delta_lz (vector-ref #(DELTA_X DELTA_Y DELTA_Z) znum))
+    `(if ,num_particle
+       (begin
+	 (define-double grid_geo (/ ,delta_l (* ,delta_ly ,delta_lz)))
+	 (define-double grid_geo_py (/ 1.0 (* ,delta_ly ,delta_ly)))
+	 (define-double grid_geo_pz (/ 1.0 (* ,delta_lz ,delta_lz)))
+	 (define-int lg)
+	 ,(gen_get_particle_data 0)
+	 (declare-int (,rBidx (floor xx)) (,rBidy (floor xy)) (,rBidz (floor xz)))
+	 ,(if use-presort
+	    `(begin
+	       (define-int cur_cache_usage 0)
+	       (define-int left_cache_usage 0)
+	       (define-int right_cache_usage (- ,(* 2 NUM_CACHE_PAR) 1))
+	       )
+	    '()
+	    )
+	 (define Midx Bidx)
+	 (define Midy Bidy)
+	 (define Midz Bidz)
+	 ;(define left_bound ,(concat 'Mid curname))
+	 (define left_bound Midx)
+	 (define right_bound (+ left_bound 1))
+
+	 (set! Bidx (- Bidx 2))
+	 (set! Bidy (- Bidy 1))
+	 (set! Bidz (- Bidz 1))
+	 (INIT_ASYNC_IO_LOCK get_sync_id)
+	 (INIT_ASYNC_IO_LOCK put_sync_id)
+	 (INIT_ASYNC_IO_LOCK get_j_sync_id)
+
+	 (define-double QE_MASS (/ Charge Mass))
+	 ;(LOG_RECORD_INFO "%e\n" QE_MASS)
+	 
+	 (block
+	   ,(begin
+	      `(begin
+		 (for-from-zero-to iz ,Byzm
+		   (for-from-zero-to iy ,Byym
+		     (define-int total_idx (+ iy (* ,Byym iz)))
+		     ;(dec-local-array double jxs_tmp ,Byxm 3)
+		     (parallel-get-memory (vrf ByzJxtmp (* ,Byxm total_idx)) (+ ,B_thread (GET_FIELD_ELEMENT_ID_KERNEL (+ ,By_idx Bidx) (+ ,By_idy Bidy) (+ ,By_idz Bidz) 0 ,numdir)) ,(* Byxm 3) get_sync_id)
+		     )
+		   )
+		 (sync-local)
+		 (WAIT_SPARSE_MEMORY get_sync_id)
+		 (define-int lg)
+		 (for (set! lg 0) (< (+ __idx lg) 60) (incf! lg __xlen)
+		   (define-int total_idx (+ __idx lg))
+		   (getxyz_blks total_idx 5 4 3)
+		   (define-double l1 (vrf ByzJxtmp (+ (* bxyzx ,By_blk_ix) (* bxyzy ,By_blk_iy) (* bxyzz ,By_blk_iz)) ,ynum))
+		   (set! (vrf ,By_shared_mem total_idx) l1)
+		   )
+		 (sync-local)
+		 ;(set! dbg_state 1)
+
+		 (begin
+		   (for-from-zero-to iz ,Bzzm
+		     (for-from-zero-to iy ,Bzym
+		       (define-int total_idx (+ iy (* ,Bzym iz)))
+		       ;(dec-local-array double jxs_tmp ,Byxm 3)
+		       (parallel-get-memory (vrf ByzJxtmp (* total_idx ,Bzxm)) (+ ,B_thread (GET_FIELD_ELEMENT_ID_KERNEL (+ ,By_idx Bidx) (+ ,By_idy Bidy) (+ ,By_idz Bidz) 0 ,numdir)) ,(* Bzxm 3) get_sync_id)
+		       )
+		     )
+
+		   (sync-local)
+		   (WAIT_SPARSE_MEMORY get_sync_id)
+		   (for (set! lg 0) (< (+ __idx lg) 60) (incf! lg __xlen)
+		     (define-int total_idx (+ __idx lg))
+		     (getxyz_blks total_idx 5 4 3)
+		     (set! (vrf ,Bz_shared_mem total_idx) (vrf ByzJxtmp (+ (* bxyzx ,Bz_blk_ix) (* bxyzy ,Bz_blk_iy) (* bxyzz ,Bz_blk_iz)) ,znum))
+		     )
+		   )
+		 (sync-local)
+		 ,(case use_small_grid
+		    (#t 
+		      `(parallel-get-memory ,Jx_shared_mem (+ ,J_thread (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz ,(* numdir 125) ,numdir 375)) 125 get_sync_id))
+		    (else
+		      `(begin
+			 (for-from-zero-to iz ,Jxzm
+			   (for-from-zero-to iy ,Jxym
+			     (define-int total_idx (+ iy (* ,Jxym iz)))
+			     (parallel-get-memory (vrf ByzJxtmp (* ,Jxxm total_idx)) 
+			       (+ ,J_thread 
+				 ,(case use_small_grid
+				   (2 `(* num_ele numallgrid pscmc_compute_unit_id))
+				   (else 0)
+				   )
+				 (GET_FIELD_ELEMENT_ID_KERNEL (+ ,By_idx Bidx) (+ ,By_idy Bidy) (+ ,By_idz Bidz)
+				   0 ,numdir . 
+				   ,(case use_small_grid
+				      (2 `((* num_ele pscmc_num_compute_units) num_ele))
+				      (else '())
+				      ))) ,(* Jxxm 3) get_sync_id)
+			     )
+			   )
+			 (WAIT_SPARSE_MEMORY get_sync_id)
+			 (sync-local)
+			 ;(define-int lg)
+			 (for (set! lg 0) (< (+ __idx lg) 80) (incf! lg __xlen)
+			   (define-int total_idx (+ __idx lg))
+			   (getxyz_blks total_idx 5 4 4)
+			   (set! (vrf ,Jx_shared_mem total_idx) (vrf ByzJxtmp (+ (* bxyzx ,Jx_blk_ix) (* bxyzy ,Jx_blk_iy) (* bxyzz ,Jx_blk_iz)) ,numdir))
+			   )
+			 )
+		      )
+		    )
+		 )
+	      )
+	   ) 
+	 ;(exit 0)
+	    ;(if 0 (for lg=0 (< (+ __idx lg) 80) (incf! lg __xlen) (define-long total_idx (+ __idx lg)) (getxyz_blks total_idx 5 4 4) (GET_CONT_MEMORY (+ ,Jx_shared_mem total_idx) (+ ,J_thread (GET_FIELD_ELEMENT_ID_KERNEL (+ bxyzx Bidx) (+ bxyzy Bidy) (+ bxyzz Bidz) ,numdir ,numdir 3)) 1 get_j_sync_id)))
+	    ,(if_isgpu
+	       `(for lg=0 lg<5 lg++
+		  (vector-set! Jaccumulate lg 0)
+		  )
+	       `(for lg=0 (< lg (* 80 ,VECLEN)) (incf! lg)
+		 (vector-set! shJx_allidx (+ (* lg IDX_OPT_MAX) __idx) 0)
+		 )
+	       )
+	 (sync-local)
+
+	 (WAIT_SPARSE_MEMORY get_sync_id)
+	 ,(begin
+	      (define blk-beg 
+		(case RUNTIME 
+		  ('SWMC 
+		    (if (and use-vec USE_VEC)
+		      `(paraforn ,(list VECLEN (* 8 VECLEN) SIMD_INTRIN_MAP) g 0 numcp) 
+		      `(inner-for-from-to g 0 numcp) ))
+		  (else `(block (define-scalar-int g 0)))
+		  ))
+	      (define incJ_multi_ver
+		`(block
+		   (define-double Jx)
+		   (force-simd-ver
+		     (set! Jx (* Charge grid_geo (- (vector-ref fBy_xplus xyzz) (vector-ref fBy_x xyzz)) (vector-ref fBy_y xyzy) (vector-ref fBz_z xyzx))))
+		   ,(if_isgpu
+		      `(begin 
+			 (if (>= __idx_all_base ,num_particle) (set! Jx 0))
+			 (vector-set! incJxtmp __idx Jx)
+			 (sync-local)
+			 (define-int remidx (remainder __idx 16))
+			 (if (< remidx 8)
+			   (incf! (vector-ref incJxtmp __idx) (vector-ref incJxtmp (+ __idx 8))))
+			 (sync-local)
+			 (reduce_small 4)
+			 (sync-local)
+			 (reduce_small 2)
+			 (sync-local)
+			 (if (eq? remidx (+ xyzx (* xyzy 4)))
+			   (begin
+			     (define-int Jx_idx (shift-l (shift-r __idx 4) 4))
+			     (define-double jat (+ (vrf incJxtmp Jx_idx) (vrf incJxtmp (+ Jx_idx 1))))
+			     (case xyzz
+			       (0  (incf! (vector-ref Jaccumulate 0) jat))
+			       (1  (incf! (vector-ref Jaccumulate 1) jat))
+			       (2  (incf! (vector-ref Jaccumulate 2) jat))
+			       (3  (incf! (vector-ref Jaccumulate 3) jat))
+			       (4  (incf! (vector-ref Jaccumulate 4) jat))
+			       (else 0)
+			       )
+			     ))
+			 (small_sync)
+			 )
+		      `(incf! (vrf shJx_allidx (+ (* (+ (* IDX_OPT_MAX (GET_IDXYZL xyzz xyzy xyzx 0 1 5 4 4)) __idx) ,VECLEN) (remainder ,(case RUNTIME ('SWMC 'g) (else 'lg)) ,VECLEN))) Jx) 
+		      )
+		   )
+		)
+	    (define prg 
+	      `(
+		 (dec-local-array double a_rva ,PAR_CACHE_LEN 6)
+		 (define-int __idx_all_base (+ (* __idx ,PAR_CACHE_LEN) lg))
+		 (define-scalar-int numcp 
+		   ,(case RUNTIME
+		      ('SWMC `(if (>= (+ __idx_all_base ,PAR_CACHE_LEN) ,num_particle) (- ,num_particle __idx_all_base) ,PAR_CACHE_LEN))
+		      (else 1)
+		      )) 
+		 (GET_SPARSE_MEMORY (vrf a_rva 0) (+ ,particle_head (* __idx_all_base ,PARTICLE_LEN)) numcp ,PARTICLE_LEN 6 get_sync_id)
+		 (WAIT_SPARSE_MEMORY get_sync_id)
+		 ;(define g 0)
+
+		 ,(if_isgpu 
+		    `(if (>= __idx_all_base ,num_particle) 
+		       (begin
+			 (set! (vrf a_rva 0 ,numdir) (+ Midx 0.2))
+			 (set! (vrf a_rva 0 ,ynum) (+ Midy 0.2))
+			 (set! (vrf a_rva 0 ,znum) (+ Midz 0.2))
+			 (set! (vrf a_rva 0 3) 0.01)
+			 (set! (vrf a_rva 0 4) 0.01)
+			 (set! (vrf a_rva 0 5) 0.01)
+			 ))
+		    '()
+		    )
+		 (block 
+		   (define-long sort_cur 0)
+		   ,(append blk-beg 
+		      `(
+			 ;(define cur_idx (+ (* __idx ,PARTICLE_LEN) g))
+			 ;(begin . ,(gen_get_particle_data 'cur_idx))
+			 ;(define gp (vrf (vrf a_rva g) 3))
+			 (define-double rx (- (vrf a_rva g ,numdir) Midx))
+			 (define-double ry (- (vrf a_rva g ,ynum) Midy))
+			 (define-double rz (- (vrf a_rva g ,znum) Midz))
+			 (define vx (vrf a_rva g ,(+ numdir 3)))
+			 ,(if (and (not use-vec) (not (isinlst RUNTIME '(CUDA OpenCL HIP SYCL))))
+			    `(if (> (* Deltat vx Deltat vx) 0.25)
+			       (fprintf stderr "warning: vx=%e dt=%e\n" vx Deltat)
+			       ) '())
+			 (define-double Iby 0)
+			 (define-double Ibz 0)
+			 (dec-array double fBy_y 4)
+			 (dec-array double fBy_z 3)
+			 (dec-array double fBz_z 4)
+			 (dec-array double fBz_y 3)
+			 (dec-array double fBy_x 5)
+			 (dec-array double fBy_xplus 5)
+			 (force-simd-ver
+			 (vector-set! fBy_y 0 ,(fl0 'ry))
+			 (vector-set! fBy_y 1 ,(fl1 'ry))
+			 (vector-set! fBy_y 2 ,(fl2 'ry))
+			 (vector-set! fBy_y 3 ,(fl3 'ry))
+			 (vector-set! fBy_z 0 ,(fl4 'rz))
+			 (vector-set! fBy_z 1 ,(fl5 'rz))
+			 (vector-set! fBy_z 2 ,(fl6 'rz))
+
+			 (vector-set! fBz_z 0 ,(fl0 'rz))
+			 (vector-set! fBz_z 1 ,(fl1 'rz))
+			 (vector-set! fBz_z 2 ,(fl2 'rz))
+			 (vector-set! fBz_z 3 ,(fl3 'rz))
+			 (vector-set! fBz_y 0 ,(fl4 'ry))
+			 (vector-set! fBz_y 1 ,(fl5 'ry))
+			 (vector-set! fBz_y 2 ,(fl6 'ry))
+
+			 (vector-set! fBy_x 0 1.0)
+			 (vector-set! fBy_x 1 ,(fl7 'rx))
+			 (vector-set! fBy_x 2 ,(fl8 'rx))
+			 (vector-set! fBy_x 3 ,(fl9 'rx))
+			 (vector-set! fBy_x 4 0.0))
+			 (define-double rxplus)
+			 (force-simd-ver 
+			   (set! rxplus (+ rx (* Deltat vx))))
+			 ;(define-int rxplus_int (floor rxplus))
+			 (define-double rxplus_int (floor rxplus))
+			 (force-simd-ver 
+			   (set! rxplus (- rxplus rxplus_int)))
+			 ;(vector-set! fBy_xplus 0 1)
+			 ;(vector-set! fBy_xplus 1 1)
+			 ;(vector-set! fBy_xplus 3 0)
+			 ;(vector-set! fBy_xplus 4 0)
+			 (define-double fByxplustmp0) 
+			 (define-double fByxplustmp1) 
+			 (define-double fByxplustmp2) 
+			 (force-simd-ver
+			 (set! fByxplustmp0 ,(fl7 'rxplus)) 
+			 (set! fByxplustmp1 ,(fl8 'rxplus))
+			 (set! fByxplustmp2 ,(fl9 'rxplus)))
+			 ;(vector-set! fBy_xplus (+ 1 rxplus_int) fByxplustmp0) ;these 3 vector-set! expressions can't be vectorized by icc
+			 ;(vector-set! fBy_xplus (+ 2 rxplus_int) fByxplustmp1)
+			 ;(vector-set! fBy_xplus (+ 3 rxplus_int) fByxplustmp2)
+			 (define-double isrx_minus (if (eq? rxplus_int -1) 1.0 0.0))
+			 (define-double isrx_zero  (if (eq? rxplus_int 0) 1.0 0.0))
+			 (define-double isrx_plus (if (eq? rxplus_int 1) 1.0 0.0))
+			 (force-simd-ver
+			 (vector-set! fBy_xplus 0 (+ (* isrx_minus fByxplustmp0) (- 1.0 isrx_minus)))
+			 (vector-set! fBy_xplus 1 (+ (* isrx_minus fByxplustmp1) (* isrx_zero fByxplustmp0) isrx_plus))
+			 (vector-set! fBy_xplus 2 (+ (* isrx_minus fByxplustmp2) (* isrx_zero fByxplustmp1) (* isrx_plus fByxplustmp0)))
+			 (vector-set! fBy_xplus 3 (+                             (* isrx_zero fByxplustmp2) (* isrx_plus fByxplustmp1)))
+			 (vector-set! fBy_xplus 4                                                           (* isrx_plus fByxplustmp2)))
+
+			 (inner-for-from-to xyzz 0 5
+			   (inner-for-from-to xyzy 0 4
+			       ;(* lg 0)
+			     (inner-for-from-to xyzx 0 3
+			       (force-simd-ver
+				 (incf! Iby (* (vector-ref ,By_shared_mem (GET_IDXYZL xyzz xyzy xyzx 0 1 5 4 3)) (- (vector-ref fBy_xplus xyzz) (vector-ref fBy_x xyzz)) (vector-ref fBy_y xyzy) (vector-ref fBy_z xyzx))) 
+				 (incf! Ibz (* (vector-ref ,Bz_shared_mem (GET_IDXYZL xyzz xyzy xyzx 0 1 5 4 3)) (- (vector-ref fBy_xplus xyzz) (vector-ref fBy_x xyzz)) (vector-ref fBz_z xyzy) (vector-ref fBz_y xyzx))))
+			       ,incJ_multi_ver
+			       )
+			     (define-scalar-int xyzx 3)
+			     ,incJ_multi_ver
+			     )
+			   )
+			 ;(fffor-xyz-from-zero-to 3 4 5 ) 
+			 ;(fffor-xyz-from-zero-to 4 4 5)
+			 ;(set! (vrf a_vz g) (+ (vrf a_rva g ,(+ znum 3)) (* QE_MASS (+ Iby))))
+			 ;(set! (vrf a_vy g) (+ (vrf a_rva g ,(+ ynum 3)) (* QE_MASS (- Ibz))))
+			 ;(set! (vrf a_rx g) (+ (vrf a_rva g ,numdir) (* Deltat vx)))
+			 (incf! (vrf a_rva g ,(+ znum 3)) (* QE_MASS (+ Iby) grid_geo_pz))
+			 (incf! (vrf a_rva g ,(+ ynum 3)) (* QE_MASS (- Ibz) grid_geo_py))
+			 (incf! (vrf a_rva g ,numdir) (* Deltat vx))
+			 ,(if use-presort
+			    `(if call_sort 
+			       (begin
+			       ;(define-int to_left (< (vrf a_rva ,numdir) left_bound))
+			       ;(define-int to_right (> (vrf a_rva ,numdir) right_bound))
+			       (cond
+				 ((< (vrf a_rva g ,numdir) left_bound)
+				   (inner-for-from-to m 0 ,PARTICLE_LEN
+				     (set! (vrf local_temp_particle_cache left_cache_usage m) (vrf a_rva g m))
+				     )
+				   (incf! left_cache_usage)
+				   )
+				 ((> (vrf a_rva g ,numdir) right_bound)
+				   (inner-for-from-to m 0 ,PARTICLE_LEN
+				     (set! (vrf local_temp_particle_cache right_cache_usage m) (vrf a_rva g m))
+				     )
+				   (incf! right_cache_usage -1)
+				   )
+				 (else
+				   (if (neq? g sort_cur)
+				     (inner-for-from-to m 0 ,PARTICLE_LEN
+				       (set! (vrf a_rva sort_cur m) (vrf a_rva g m))
+				       ))
+				   (incf! sort_cur)
+				   )
+				 ;(else 0)
+				 )
+			       )) '())
+			 ;(PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base) 3 (* g ,PARTICLE_LEN) ,ynum) (+  (vrf a_rva g) ,ynum 3) 1 put_sync_id)
+			 ;(PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base) 3 (* g ,PARTICLE_LEN) ,znum) (+  (vrf a_rva g) ,znum 3) 1 put_sync_id)
+			 ;(PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base) (* g ,PARTICLE_LEN) ,numdir) (+  (vrf a_rva g) ,numdir) 1 put_sync_id)
+			 ))
+		   ,(if nopush
+		      '()
+		      (if use-presort
+			`(if call_sort 
+			   (if sort_cur 
+			     (begin
+			       (PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN cur_cache_usage) (* lg 0)) (vrf a_rva 0) (* sort_cur ,PARTICLE_LEN))
+			       (incf! cur_cache_usage sort_cur)
+			       )
+			     )
+			   (begin (PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base)) (vrf a_rva 0) (* numcp ,PARTICLE_LEN)))
+			   ) 
+			`(begin (PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base)) (vrf a_rva 0) (* numcp ,PARTICLE_LEN)))
+			))
+		   )
+		 ;(PUT_SPARSE_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base) ,numdir) a_rx numcp ,PARTICLE_LEN 1 put_sync_id)
+		 ;(PUT_SPARSE_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base) ,ynum 3) a_vy  numcp ,PARTICLE_LEN 1 put_sync_id)
+		 ;(PUT_SPARSE_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base) ,znum 3) a_vz numcp ,PARTICLE_LEN 1 put_sync_id)
+		 ;(PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base)) (vrf a_rva 0) (* numcp ,PARTICLE_LEN) put_sync_id)
+		 (WAIT_SPARSE_MEMORY put_sync_id)
+		 ))
+	    (if (and USE_VEC use-vec (isinlst RUNTIME '(C COI OpenMP))) ; '(C OpenMP)
+	      (append 
+		`(paraforn 
+		   ,(lcons VECLEN (* 8 VECLEN) 
+		      ;'((double __m256d) (long __m256i) (int __m256i) (size_t __v4du) (set-single _mm256_setr_pd))
+		      (if USE_INTRIN (list SIMD_INTRIN_MAP) '())
+		      ;'((double __m512d) (long __m512i) (int __m512i) (size_t __v8du) (set-single _mm512_setr_pd))
+		      ) 
+		   lg 0 ,num_particle) prg)
+	      (append 
+		;`(for lg=0 (< (+ (* __idx ,PAR_CACHE_LEN) lg) ,num_particle) (incf! lg (* __xlen ,PAR_CACHE_LEN))) ;only 1xN or Nx1 are accepted
+		`(for lg=0 (< lg ,num_particle) (incf! lg (* __xlen ,PAR_CACHE_LEN))) ;only 1xN or Nx1 are accepted
+		prg)
+	      ))
+	 ,(if use-presort
+	    `(if call_sort 
+	       (begin
+	       (define-int x_main cur_cache_usage)
+	       (define-int x_beg_minus x_main)
+	       (define-int x_beg_plus (+ (/ (- grid_cache_len load0) 2) left_cache_usage x_main))
+	       (define-int right_len (- ,(- (* 2 NUM_CACHE_PAR) 1) right_cache_usage))
+	       (dec-local-array int xm4 4)
+	       (set! (vector-ref xm4 0) x_main)
+	       (set! (vector-ref xm4 1) (+ left_cache_usage x_main))
+	       (set! (vector-ref xm4 2) x_beg_plus)
+	       (set! (vector-ref xm4 3) (+ right_len x_beg_plus))
+	       (PUT_CONT_MEMORY (+ xyzw (* 4 (+ ,(if use_small_grid 0 'cu_offset) cr_allgid))) xm4 4 put_sync_id)
+
+	       ;(PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN __idx_all_base)) (vrf a_rva 0) (* ,PARTICLE_LEN))
+	       (PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN x_beg_minus)) (vrf local_temp_particle_cache 0) (* left_cache_usage ,PARTICLE_LEN))
+	       (PUT_CONT_MEMORY (+ ,particle_head (* ,PARTICLE_LEN x_beg_plus)) (vrf local_temp_particle_cache (+ right_cache_usage 1)) (* right_len ,PARTICLE_LEN))
+	       ))
+	    '()
+	    )
+
+	 
+	 (WAIT_SPARSE_MEMORY get_j_sync_id)
+	 (sync-local)
+	 ,(if_isgpu
+	    `(begin 
+	       ;(define-int Jx_idx (shift-l (shift-r __idx 4) 4))
+	       ;(define-int l_idx (remainder __idx 16))
+	       (inner-for-from-to m1 0 5
+		 (vector-set! incJxtmp __idx (vector-ref Jaccumulate m1))
+		 (sync-local)
+		 (if (eq? IDX_OPT_MAX 64)
+		   (begin 
+		     (if (< __idx 32)
+		       (incf! (vrf incJxtmp __idx ) (vrf incJxtmp (+ __idx 32))))
+		     (sync-local)
+		     )
+		   )
+		 (if (or (eq? IDX_OPT_MAX 64) (eq? IDX_OPT_MAX 32))
+		   (begin 
+		     (if (< __idx 16)
+		       (incf! (vrf incJxtmp __idx) (vrf incJxtmp (+ __idx 16))))
+		     (sync-local)
+		     )
+		   )
+		 (if (< __idx 16)
+		   (begin
+		     (define-int xyzy (/ __idx 4))
+		     (define-int xyzx (remainder __idx 4))
+		     ;(incf! (vector-ref ,Jx_shared_mem (+ __idx (* 16 m1))) (vrf incJxtmp __idx))
+		     (incf! (vector-ref ,Jx_shared_mem (+ m1 (* 5 (+ xyzy (* 4 xyzx))))) (vrf incJxtmp __idx))
+		     ;(incf! (vector-ref ,Jx_shared_mem (+ m1 (* 5 __idx))) (vrf incJxtmp __idx))
+		     )
+		   )
+		 (sync-local)
+		 )
+	       )
+	    `(for lg=0 (< (+ lg __idx) 80) (incf! lg __xlen)
+	       (define-double inctmp 0)
+	       (for-from-to i 0 (* ,VECLEN IDX_OPT_MAX)
+		 (incf! inctmp (vector-ref shJx_allidx (+ (* (+ lg __idx) IDX_OPT_MAX ,VECLEN) i)))
+		 )
+	       ,(case use_small_grid
+		  (#t
+		    (begin
+		      (define xyzvec (list->vector '(bxyzx bxyzy bxyzz bxyzx bxyzy bxyzz)))
+		      (define axyzx (vector-ref xyzvec (- 3 numdir)))
+		      (define axyzy (vector-ref xyzvec (- 4 numdir)))
+		      (define axyzz (vector-ref xyzvec (- 5 numdir)))
+		      `(begin
+			 (define-int lidx (+ lg __idx))
+			 (getxyz_blks lidx 5 4 4)
+			 (incf! bxyzy)
+			 (incf! bxyzz)
+			 ;(define-int newidx (+ (* 3 (+ ,axyzx (* 5 (+ ,axyzy (* 5 ,axyzz))))) ,numdir))
+			 (define-int newidx (+ ,axyzx (* 5 (+ ,axyzy (* 5 ,axyzz)))) )
+			 (incf! (vector-ref ,Jx_shared_mem newidx) inctmp)
+			 )))
+		  (else
+		    `(incf! (vector-ref ,Jx_shared_mem (+ lg __idx)) inctmp)))
+	       ))
+	 (sync-local)
+	 
+	 ,(case use_small_grid
+	    (#t
+	      `(parallel-put-memory (+ ,J_thread (GET_FIELD_ELEMENT_ID_KERNEL Midx Midy Midz ,(* numdir 125) ,numdir 375)) ,Jx_shared_mem 125))
+	    (else
+	      `(block
+		 (define-int lg)
+		 (for (set! lg 0) (< (+ __idx lg) 80) (incf! lg __xlen)
+		   (define-int total_idx (+ __idx lg))
+		   (getxyz_blks total_idx 5 4 4)
+		   ;(if (not dbg_state) (fprintf stderr "%e\n" (vrf ,Jx_shared_mem total_idx)))
+		   (set! (vrf ByzJxtmp (+ (* bxyzx ,Jx_blk_ix) (* bxyzy ,Jx_blk_iy) (* bxyzz ,Jx_blk_iz)) ,numdir) (vrf ,Jx_shared_mem total_idx))
+		   )
+		 (sync-local)
+		 (for-from-zero-to iz ,Jxzm
+		   (for-from-zero-to iy ,Jxym
+		     (define-int total_idx (+ iy (* ,Jxym iz)))
+		     (parallel-put-memory 
+		       (+ ,J_thread 
+			 ,(case use_small_grid
+			    (2 `(* num_ele numallgrid pscmc_compute_unit_id))
+			    (else 0)
+			    )
+			 (GET_FIELD_ELEMENT_ID_KERNEL (+ ,By_idx Bidx) (+ ,By_idy Bidy) (+ ,By_idz Bidz)
+			   0 ,numdir . 
+			   ,(case use_small_grid
+			      (2 `((* num_ele pscmc_num_compute_units) num_ele))
+			      (else '())
+			      ))) (vrf ByzJxtmp (* ,Jxxm total_idx)) ,(* Jxxm 3) put_sync_id)
+		     )
+		   )
+		 (WAIT_SPARSE_MEMORY put_sync_id)
+		 )
+	      ) 
+	    )
+		 ;(set! dbg_state 1)
+	 (sync-local) ;must have a sync-local to avoid refereshing the shE
+
+	 (WAIT_SPARSE_MEMORY put_sync_id)
+	 )))
+  )
+(define-scmc-global all_vars '((double* inoutput) (int* xyzw) (double* cu_cache) (int* cu_xyzw) (double* fieldE) (double* fieldB) (double* FoutJ) (double* FoutEN) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double Mass) (double Charge ) (int SPEC) (int NUM_SPEC) (double DELTA_X) (double DELTA_Y) (double DELTA_Z) (double Deltat)))
+(define-scmc-global all_vars_new '((double* inoutput) (int* xyzw) (double* cu_cache) (int* cu_xyzw) (double* fieldE) (double* fieldB) (double* FoutJ) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double Mass0) (double Charge0 ) (double Deltat)))
+(define-scmc-global all_vars_0 (append all_vars_new '((double DELTA_X) (double DELTA_Y) (double DELTA_Z))))
+(define-scmc-global all_vars_sg (replace-all all_vars 'FoutJ 'LFoutJ))
+(define-scmc-global gen_passE_calc_grid 
+  (lambda (particle_head num_particle E_shared_mem E_thread use-vlo use-calj)
+    (define (gen_get_particle_data cur_idx)
+      (cons 'begin
+	(let loop ((n 0) (xvs '(xx xy xz)))
+	  (cond
+	    ((null? xvs) '())
+	    (else
+	      (cons `(define-double ,(car xvs) (vrf ,particle_head (+ ,n (* ,cur_idx ,PARTICLE_LEN))))
+		(loop (+ n 1) (cdr xvs))
+		)
+	      )
+	    )
+	  ))
+      )
+    `(if ,num_particle
+       (begin
+	 (define-int lg)
+	 ,(gen_get_particle_data 0)
+	 (declare-int (Bidx (floor xx)) (Bidy (floor xy)) (Bidz (floor xz)))
+	 (define Midx Bidx)
+	 (define Midy Bidy)
+	 (define Midz Bidz)
+	 (set! Bidx (- Bidx 1))
+	 (set! Bidy (- Bidy 1))
+	 (set! Bidz (- Bidz 1))
+	 (INIT_ASYNC_IO_LOCK get_sync_id)
+	 (INIT_ASYNC_IO_LOCK get_j_sync_id)
+	 (INIT_ASYNC_IO_LOCK put_sync_id)
+	 (define-double QE_MASS (/ Charge Mass))
+	 (for-from-zero-to iz 4 
+	   (for-from-zero-to iy 4
+	     (define-long total_idx (+ iy (* iz 4)))
+	     (parallel-get-memory (+ ,E_shared_mem (* total_idx 3 4)) (+ ,E_thread (GET_FIELD_ELEMENT_ID_KERNEL Bidx (+ iy Bidy) (+ iz Bidz) 0 0)) (* 3 4) get_sync_id)
+	     )
+	   )
+	 (WAIT_SPARSE_MEMORY get_sync_id)
+	 (sync-local)
+	 ,(append
+	    (if (and USE_VEC use-vlo (isinlst RUNTIME '(C COI OpenMP)))
+	      `(paraforn ,(lcons VECLEN (* 8 VECLEN) (if USE_INTRIN (list SIMD_INTRIN_MAP) '())) lg 0 ,num_particle)
+	      `(for lg=0 (< (+ (* __idx ,PAR_CACHE_LEN) lg) ,num_particle) (incf! lg (* __xlen ,PAR_CACHE_LEN)))
+	      )
+	    `(
+	       ;for lg=0 (< (+ (* __idx ,PAR_CACHE_LEN) lg) ,num_particle) (incf! lg (* __xlen ,PAR_CACHE_LEN)) ;only 1xN or Nx1 are accepted
+	       ;(dec-local-array double a_ra ,PAR_CACHE_LEN 3)
+	       ;(dec-local-array double a_va ,PAR_CACHE_LEN 3)
+
+	       (dec-local-array double a_rva ,PAR_CACHE_LEN ,PARTICLE_LEN)
+	       (define-int __idx_all_base (+ (* __idx ,PAR_CACHE_LEN) lg))
+	       (define-scalar-int numcp 
+		 ,(case RUNTIME
+		    ('SWMC `(if (>= (+ __idx_all_base ,PAR_CACHE_LEN) ,num_particle) (- ,num_particle __idx_all_base) ,PAR_CACHE_LEN))
+		    (else 1)
+		    )) 
+	       ;(GET_SPARSE_MEMORY (vrf a_ra 0) (+ ,particle_head (* __idx_all_base ,PARTICLE_LEN) 0) numcp ,PARTICLE_LEN 3 get_sync_id)
+	       ;(GET_SPARSE_MEMORY (vrf a_va 0) (+ ,particle_head (* __idx_all_base ,PARTICLE_LEN) 3) numcp ,PARTICLE_LEN 3 get_sync_id)
+	       (GET_CONT_MEMORY (vrf a_rva 0) (+ ,particle_head (* __idx_all_base ,PARTICLE_LEN)) (* numcp ,PARTICLE_LEN) get_sync_id)
+
+	       (WAIT_SPARSE_MEMORY get_sync_id)
+	       ,(append
+		  (case RUNTIME 
+		    ;('SWMC `(inner-for-from-to g 0 numcp))
+		    ('SWMC 
+		      (if (and use-vlo USE_VEC) 
+			`(paraforn ,(list VECLEN (* 8 VECLEN) SIMD_INTRIN_MAP) g 0 numcp) 
+			`(inner-for-from-to g 0 numcp)))
+		    (else `(block (define-scalar-int g 0)))
+		    )
+		  `(
+		     (define-double rx (- (vrf a_rva g 0) Midx))
+		     (define-double ry (- (vrf a_rva g 1) Midy))
+		     (define-double rz (- (vrf a_rva g 2) Midz))
+		     ;(LOG_RECORD_INFO "[%e %e %e] %d %d\n" rx ry rz g lg)
+		     (dec-array double fEx 4)
+		     (dec-array double fEy 4)
+		     (dec-array double fEz 4)
+		     (dec-array double fdEx 3)
+		     (dec-array double fdEy 3)
+		     (dec-array double fdEz 3)
+		     (define-double AllEx 0)
+		     (define-double AllEy 0)
+		     (define-double AllEz 0)
+		     (constant-for-from-to i 0 4
+		       (force-simd-ver
+			 (vector-set! fEx i (eval-scmc-global (eval (list (concat 'fl (number->string i)) 	   ''rx))))
+			 (vector-set! fEy i (eval-scmc-global (eval (list (concat 'fl (number->string i)) 	   ''ry))))
+			 (vector-set! fEz i (eval-scmc-global (eval (list (concat 'fl (number->string i)) 	   ''rz)))))
+		       )
+		     (constant-for-from-to i 0 3
+		       (force-simd-ver
+			 (vector-set! fdEx i (eval-scmc-global (eval (list (concat 'fl (number->string (+ 4 i))) ''rx))))
+			 (vector-set! fdEy i (eval-scmc-global (eval (list (concat 'fl (number->string (+ 4 i))) ''ry))))
+			 (vector-set! fdEz i (eval-scmc-global (eval (list (concat 'fl (number->string (+ 4 i))) ''rz)))))
+		       )
+		     (inner-for-from-to idz 0 4
+		       (inner-for-from-to __idy 0 4
+			 (inner-for-from-to __idx 0 3
+			   (force-simd-ver
+			     (set! AllEx (+ AllEx (* (vector-ref ,E_shared_mem (paraids __idx __idy idz 0 4)) (vector-ref fdEx __idx) (vector-ref fEy __idy) (vector-ref fEz idz))))
+			     (set! AllEy (+ AllEy (* (vector-ref ,E_shared_mem (paraids idz __idx __idy 1 4)) (vector-ref fdEy __idx) (vector-ref fEz __idy) (vector-ref fEx idz))))
+			     (set! AllEz (+ AllEz (* (vector-ref ,E_shared_mem (paraids __idy idz __idx 2 4)) (vector-ref fdEz __idx) (vector-ref fEx __idy) (vector-ref fEy idz)))))
+			   )))
+		     (declare-double allincfvx allincfvy allincfvz)
+		     (force-simd-ver
+		       (set! allincfvx (/ (* Deltat QE_MASS AllEx) (* DELTA_X DELTA_X)))
+		       (set! allincfvy (/ (* Deltat QE_MASS AllEy) (* DELTA_Y DELTA_Y)))
+		       (set! allincfvz (/ (* Deltat QE_MASS AllEz) (* DELTA_Z DELTA_Z)))
+		       )
+		     ;(LOG_RECORD_INFO "%e %e %e\n" (vrf a_va g 0) (vrf a_va g 1) (vrf a_va g 2))
+		     ;(LOG_RECORD_INFO "old=[%e %e %e %e %e %e]\n" (vrf a_rva g 0) (vrf a_rva g 1) (vrf a_rva g 2) (vrf a_rva g 3) (vrf a_rva g 4) (vrf a_rva g 5))
+		     (incf! (vrf a_rva g 3) allincfvx)
+		     ;(incf! (vrf a_va g 0) (* Deltat QE_MASS (vector-ref ,E_shared_mem (paraids 1 1 1 0 4))))
+		     ;(define-double acc (/ (* Deltat QE_MASS AllEy) (* DELTA_Y DELTA_Y)))
+		     ;(if (> acc 0.01) (LOG_RECORD_INFO "acc=%e r=[%e %e %e]\n" acc (vrf a_rva g 0) (vrf a_rva g 1) (vrf a_rva g 2)))
+		     (incf! (vrf a_rva g 4) allincfvy)
+		     (incf! (vrf a_rva g 5) allincfvz)
+		     ;(LOG_RECORD_INFO "new=[%e %e %e %e %e %e]\n" (vrf a_rva g 0) (vrf a_rva g 1) (vrf a_rva g 2) (vrf a_rva g 3) (vrf a_rva g 4) (vrf a_rva g 5))
+		     ;(if (== lg 2) (exit 0))
+		     ))
+	       ;(PUT_SPARSE_MEMORY (+ ,particle_head (* __idx_all_base ,PARTICLE_LEN) 3) (vrf a_va 0) numcp ,PARTICLE_LEN 3 put_sync_id)
+	       ;(sync-local)
+	       ;(parallel-put-memory (+ ,particle_head (* __idx_all_base ,PARTICLE_LEN)) (vrf a_rva 0) (* numcp ,PARTICLE_LEN))
+	       (PUT_CONT_MEMORY (+ ,particle_head (* __idx_all_base ,PARTICLE_LEN)) (vrf a_rva 0) (* numcp ,PARTICLE_LEN))
+	       ))
+	 (sync-local) ;must have
+	 )
+       ))
+  )
+(define-scmc-global  gen_long_for_opt_loop ;the inner_arrays is used to copy data from main memory
+  (lambda (i from to inner_arrays num_opt use-writeback body . use-vec-g)
+    (define use-dual-buffer #f)
+    (define use-vec #f)
+    (if (null? use-vec-g) 
+      (set! use-vec #f) 
+      (begin
+	(set! use-vec (car use-vec-g))
+	(if (null? (cdr use-vec-g))
+	  0
+	  (set! use-dual-buffer (cadr use-vec-g))
+	  )
+	)
+      )
+    ;inner_arrays should be ((double arr1 arr1-head 6) (int arr2 arr2-head 4) ...)
+    (define tmp-i-outter (multi-concat i '_outter))
+    (define tmp-i-inner (multi-concat i '_inner))
+    (define (gen-copy is-get)
+      (begin-map 
+	(lambda (v)
+	  (multi-define type var var-head var-arrlen v)
+	  (define new-varname (multi-concat var '_inner_cache))
+	  (define new-varname-rest (concat new-varname '_rst))
+	  (case is-get
+	    ('decl-dbf
+	      `(begin
+		 (dec-array ,type ,(concat new-varname '_a) (* ,var-arrlen ,num_opt))
+		 (dec-array ,type ,(concat new-varname '_b) (* ,var-arrlen ,num_opt))
+		 (declare ,(concat type '*) (,new-varname ,(concat new-varname '_a)))
+		 (declare ,(concat type '*) (,new-varname-rest ,(concat new-varname '_b)))
+		 )
+	      )
+	    ('iget-next-buf
+	      `(GET_CONT_MEMORY ,new-varname-rest (+ ,var-head (* ,tmp-i-outter ,var-arrlen)) (* numcp ,var-arrlen) l_get_sync_id)
+	      )
+	    ('iwrite-cur-buf
+	      (if use-writeback
+		`(PUT_CONT_MEMORY (+ ,var-head (* ,tmp-i-outter ,var-arrlen)) ,new-varname (* numcp ,var-arrlen) l_put_sync_id) '())
+	      )
+	    ('swap-next-buf
+	      `(block
+		 (define-void* tmp ,new-varname)
+		 (set! ,new-varname ,new-varname-rest)
+		 (set! ,new-varname-rest tmp))
+	      )
+	    (#t
+	      `(begin
+		 (dec-local-array ,type ,new-varname (* ,var-arrlen ,num_opt))
+		 (GET_CONT_MEMORY ,new-varname (+ ,var-head (* ,tmp-i-outter ,var-arrlen)) (* numcp ,var-arrlen) l_get_sync_id)
+		 ))
+	    (#f
+	      (if use-writeback
+		`(PUT_CONT_MEMORY (+ ,var-head (* ,tmp-i-outter ,var-arrlen)) ,new-varname (* numcp ,var-arrlen) l_put_sync_id)
+		'()
+		))
+	    (1
+	      (if (and use-vec (eq? RUNTIME 'SWMC))
+		`(begin
+		   (dec-array ,type ,var ,var-arrlen)
+		   (inner-for-from-to i 0 ,var-arrlen
+		     (vector-set! ,var i (vector-ref ,new-varname (+ i (* ,var-arrlen ,tmp-i-inner))))
+		     )
+		   )
+		`(declare ,(multi-concat type '*) (,var (+ ,new-varname (* ,var-arrlen ,tmp-i-inner)))))
+	      )
+	    (else
+	      (if (and use-vec (eq? RUNTIME 'SWMC))
+		`(begin
+		   ;(dec-array ,type ,var ,var-arrlen)
+		   (inner-for-from-to i 0 ,var-arrlen
+		     (set! (vector-ref ,new-varname (+ i (* ,var-arrlen ,tmp-i-inner))) (vector-ref ,var i))
+		     )
+		   )
+		'())
+	      )
+	    )
+	  )
+	inner_arrays
+	)
+      )
+    (cond
+      ((isinlst RUNTIME '(COI OpenMP C))
+	(define (gen-copy is-get)
+	  (begin-map
+	    (lambda (v)
+	      (multi-define type var var-head var-arrlen v)
+	      ;(define new-varname (multi-concat var '_inner_cache))
+	      (case is-get
+		(#t
+		  `(begin
+		     (dec-array ,type ,var ,var-arrlen)
+		     (inner-for-from-to stmpg1 0 ,var-arrlen 
+		       (vector-set! ,var stmpg1 (vector-ref ,var-head (+ stmpg1 (* (if (< ,tmp-i-inner ,to) ,tmp-i-inner (- ,to 1)) ,var-arrlen))))
+		       )
+		     )
+		  )
+		(#f 
+		  (if use-writeback
+		    `(inner-for-from-to stmpg1 0 ,var-arrlen
+		       (if (< ,tmp-i-inner ,to) (vector-set! ,var-head (+ stmpg1 (* ,tmp-i-inner ,var-arrlen)) (vector-ref ,var stmpg1)))
+		       )
+		    '()
+		    ))
+		(else
+		  '()
+		  )
+		)
+	      ) 
+	    inner_arrays
+	    )
+	  )
+	(define pfbg `(paraforn (,VECLEN ,(* VECLEN 8) . ,(if USE_INTRIN (list SIMD_INTRIN_MAP PARA_FOR_INNER_EXPAND 'double 'simd_mask #t) '())) ,tmp-i-inner ,from ,to))
+	;(define pfbg `(paraforn (,VECLEN ,(* VECLEN 8) . ,(if USE_INTRIN (list SIMD_INTRIN_MAP PARA_FOR_INNER_EXPAND) '())) ,tmp-i-inner ,from ,to))
+	(define fbg `(for-from-to ,tmp-i-inner ,from ,to))
+	`(block
+	   (define-double simd_mask 1)
+	   ,(append (if use-vec pfbg fbg)
+	      `(
+		 (begin
+		   ,(gen-copy #t)
+		   ,body
+		   ,(gen-copy #f)
+		   )
+		 )))
+	)
+      ((isinlst RUNTIME '(OpenCL CUDA HIP SYCL))
+	(define (gen-copy num)
+	  (begin-map 
+	    (lambda (v)
+	      (multi-define type var var-head var-arrlen v)
+	      (case num
+		(1
+		  `(begin
+		     (dec-local-array ,type ,var ,var-arrlen)
+		     (inner-for-from-to stmpg1 0 ,var-arrlen
+		       (vector-set! ,var stmpg1 (vector-ref ,var-head (+ stmpg1 (* (+ ,tmp-i-inner __idx) ,var-arrlen)))))
+		     ))
+		(2 
+		  `(inner-for-from-to stmpg1 0 ,var-arrlen
+		     (vector-set! ,var-head (+ stmpg1 (* (+ ,tmp-i-inner __idx) ,var-arrlen)) (vector-ref ,var stmpg1)))
+		  )
+		(3 `(begin
+		      (dec-local-array ,type ,var ,var-arrlen)
+		      (inner-for-from-to stmpg1 0 ,var-arrlen
+			(define-int cid (+ ,tmp-i-inner __idx))
+			(vector-set! ,var stmpg1 (if (< cid ,to) (vector-ref ,var-head (+ stmpg1 (* cid ,var-arrlen))) (vector-ref ,var-head (+ stmpg1 (* ,tmp-i-inner ,var-arrlen)))))
+			)
+		      )
+		  )
+		(4
+		  `(inner-for-from-to stmpg1 0 ,var-arrlen
+		     (define-int cid (+ ,tmp-i-inner __idx))
+		     (if (< cid ,to)
+		       (vector-set! ,var-head (+ stmpg1 (* cid ,var-arrlen)) (vector-ref ,var stmpg1)))
+		     )
+		  )
+		(else 0)
+		)
+	      )
+	    inner_arrays)
+
+	  )
+	;(define fbg0 `(for (set! ,tmp-i-inner 0) (< ,tmp-i-inner (+ (- ,to __xlen) 1)) (incf! ,tmp-i-inner __xlen)))
+	(define fbg0 `(for (set! ,tmp-i-inner 0) (< ,tmp-i-inner ,to) (incf! ,tmp-i-inner __xlen)))
+	(define fbg1 `(for 0 (< ,tmp-i-inner ,to) (incf! ,tmp-i-inner __xlen)))
+	`(block
+	   (define-int ,tmp-i-inner)
+	   ,(append fbg0 
+	      `(
+		 (define-double simd_mask 1)
+		 (define-int ,i (+ ,tmp-i-inner __idx))
+		 (define-int _gen_long_for_opt_loop_already_idx_0 (>= ,i ,to))
+		 ,(gen-copy 3)
+		 ,body
+		 ,(gen-copy 4)
+		 )
+	      )
+	     ,(gen-copy #f)
+	   )
+	)
+      (else
+	(define fbg `(for (set! ,tmp-i-inner 0) (< ,tmp-i-inner numcp) (incf! ,tmp-i-inner __xlen)))
+	(define pfbg `(paraforn (,VECLEN ,(* VECLEN 8) . ,(if USE_INTRIN (list SIMD_INTRIN_MAP PARA_FOR_INNER_EXPAND) '())) ,tmp-i-inner 0 numcp))
+	(if (and use-vec use-dual-buffer)
+	  `(block
+	     (define-double simd_mask 1)
+	     (define-long ,tmp-i-outter ,from)
+	     (INIT_ASYNC_IO_LOCK l_get_sync_id)
+	     (INIT_ASYNC_IO_LOCK l_put_sync_id)
+	     (define-long numcp ,num_opt)
+	     (if (> numcp (- ,to ,from)) (set! numcp (- ,to ,from)))
+	     ,(gen-copy 'decl-dbf)
+	     ,(gen-copy 'iget-next-buf)
+	     (for (set! ,tmp-i-outter ,from) (< ,tmp-i-outter ,to) (incf! ,tmp-i-outter ,num_opt)
+		  (define-long numcp ,num_opt)
+		  (if (> (+ numcp ,tmp-i-outter) ,to) (set! numcp (- ,to ,tmp-i-outter)))
+		  (WAIT_SPARSE_MEMORY l_get_sync_id)
+		  ,(gen-copy 'swap-next-buf)
+		  (define-long ,tmp-i-inner)
+		  ,(append pfbg 
+			   `(
+			     (define-int ,i (+ ,tmp-i-outter ,tmp-i-inner))
+			     (force-scalar-ver
+			       (if (eq? ,tmp-i-inner (/ ,num_opt 2))
+				 (begin 
+				   (define-int numcp ,num_opt)
+				   (define-int ti_tmp (+ ,tmp-i-outter numcp))
+				   (if (> numcp (- ,to (+ ,tmp-i-outter numcp))) (set! numcp (- ,to (+ ,tmp-i-outter numcp))))
+				   (if (> numcp 0) 
+				     (block
+				       (define-int ,tmp-i-outter ti_tmp)
+				       (WAIT_SPARSE_MEMORY l_put_sync_id)
+				       ,(gen-copy 'iget-next-buf)))
+				   )
+				 ))
+			     ,(gen-copy 1)
+			     ,body
+			     ,(gen-copy 2)
+			     ) 
+			   ) 
+		  ,(gen-copy 'iwrite-cur-buf)
+		  )
+	     (WAIT_SPARSE_MEMORY l_put_sync_id)
+	     )
+	  `(block
+	     (define-long ,tmp-i-outter)
+	     (INIT_ASYNC_IO_LOCK l_get_sync_id)
+	     (INIT_ASYNC_IO_LOCK l_put_sync_id)
+	     (define-double simd_mask 1)
+	     (for (set! ,tmp-i-outter ,from) (< ,tmp-i-outter ,to) (incf! ,tmp-i-outter (* ,num_opt __xlen))
+		  (define-long numcp ,num_opt)
+		  (if (> (+ numcp ,tmp-i-outter) ,to) (set! numcp (- ,to ,tmp-i-outter)))
+		  ,(gen-copy #t)
+		  (WAIT_SPARSE_MEMORY l_get_sync_id)
+		  (sync-local)
+		  (define-long ,tmp-i-inner)
+		  ,(append
+		     (if (and use-vec (isinlst RUNTIME  '(SWMC))) 
+		       (append pfbg 
+			       `(
+				 (define-int ,i (+ ,tmp-i-outter ,tmp-i-inner))
+				 ,(gen-copy 1)
+				 ,body
+				 ,(gen-copy 2)
+				 ) 
+			       ) 
+		       (append fbg
+			       `(
+				 (if (< (+ __idx ,tmp-i-inner) numcp)
+				   (begin
+				     (define-int ,i (+ ,tmp-i-outter ,tmp-i-inner __idx))
+				     ,(gen-copy 1)
+				     ,body
+				     ,(gen-copy 2)
+				     ))
+				 ))))
+		  ,(gen-copy #f)
+		  (WAIT_SPARSE_MEMORY l_put_sync_id)
+		  )
+	     )
+	  )
+	)
+      ))
+  )

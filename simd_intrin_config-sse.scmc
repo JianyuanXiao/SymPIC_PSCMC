@@ -1,0 +1,8 @@
+(define-scmc-global USE_VEC #t)
+;(define-scmc-global USE_AVX_INTRIN #t)
+(define-scmc-global USE_INTRIN #t)
+(define-scmc-global SIMD_HEADER "immintrin.h")
+(define-scmc-global VECLEN (if (and USE_VEC (isinlst RUNTIME '(C OpenMP))) 2 1))
+;(define-scmc-global SIMD_INTRIN_MAP `((double __m128d) (long __m128i) (int __m128i) (size_t __v4du) (set-single _mm128_setr_pd)))
+(define-scmc-global SIMD_INTRIN_MAP `((double __m128d) (long __m128i) (int __m128i) (size_t __v4du) (set-single _mm_setr_pd) (sqrt _mm_sqrt_pd) (floor _mm_floor_pd)))
+

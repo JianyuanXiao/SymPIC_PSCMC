@@ -1,0 +1,361 @@
+;paravec.scmc general_macros.scmc fdtd_helper.scmc mur_abc.kernel.def.ss yeefdtd.kernel.def.ss dm.kernel.def.ss multi-array-pscmc.scmc mpifields-common.scmc
+
+(input-scmc "mpifields-common.scmc")
+
+
+(eval-scmc-global
+  `(begin
+     (defun set_Field3D_Seq int ,(append '((Field3D_Seq* pthis) ) field-vars) 
+       ,(cons 'begin (map (lambda (x) (fun-setp-class 'pthis (cadr x))) field-vars))
+       (set! (structp-ref pthis xblock) (+ xlen (* 2 ovlp)))
+       (set! (structp-ref pthis yblock) (+ ylen (* 2 ovlp)))
+       (set! (structp-ref pthis zblock) (+ zlen (* 2 ovlp)))
+       (return 0)
+       )
+     )
+  )
+
+(defmacro addprefix_endfix (name num endfix)
+  (multi-concat (fun_gtnmbn num) name endfix)
+  )
+(eval-scmc-global 
+  (cons 'begin
+    (map 
+      (lambda (rt)
+	(set! rt (car rt))
+	`(begin
+	   (defun-class-Field3D_Seq ,(multi-concat rt 'delete_Field3D_Seq) int ()
+	     (declare-int i)
+	     (for i=0 (< i NUM_SYNC_LAYER) i++
+	       (,(multi-concat rt "pscmc_mem_destroy") (vector-ref (structp-ref pthis sync_layer_pscmc) i))
+	       (,(multi-concat rt "pscmc_mem_destroy") (vector-ref (structp-ref pthis swap_layer_pscmc) i))
+	       (free (vector-ref (structp-ref pthis sync_layer_pscmc) i))
+	       (free (vector-ref (structp-ref pthis swap_layer_pscmc) i))
+	       )
+	     (,(multi-concat rt "pscmc_mem_destroy") (structp-ref pthis rdcd))
+	     (free (structp-ref pthis rdcd))
+	     (free global_id)
+	     (free global_x_offset)
+	     (free global_y_offset)
+	     (free global_z_offset)
+	     (free adj_ids)
+	     (free adj_processes)
+	     (free adj_local_tid)
+	     (return 0)
+	     )
+	   (defun-class-Field3D_Seq ,(multi-concat rt 'command_flush) int ()
+	     (,(multi-concat rt 'pscmc_flush) pe)
+	     )
+	   (defun-class-Field3D_Seq ,(multi-concat rt 'alloc_Field3D_Seq) int ((int is_init_kernels))
+	     (setpthisvarmalloc global_id long numvec)
+	     (setpthisvarmalloc global_x_offset long numvec)
+	     (setpthisvarmalloc global_y_offset long numvec)
+	     (setpthisvarmalloc global_z_offset long numvec)
+	     (setpthisvarmalloc adj_ids long (* NUM_SYNC_LAYER numvec))
+	     (setpthisvarmalloc adj_local_tid long (* NUM_SYNC_LAYER numvec))
+	     (setpthisvarmalloc adj_processes long (* NUM_SYNC_LAYER numvec))
+	     (declare-int i)
+	     (if is_init_kernels
+	       ,(begin-map init-single-kernel blas-kernels))
+	     (define-size_t ovleal_aio 0)
+	     (for i=0 (< i NUM_SYNC_LAYER) i++
+	       (define-int locali i)
+	       (getxyz_blks locali 3 3 3)
+	       (define ovlpxmax xlen)
+	       (define ovlpymax ylen)
+	       (define ovlpzmax zlen)
+	       (if (neq? bxyzx 1) (set! ovlpxmax ovlp))
+	       (if (neq? bxyzy 1) (set! ovlpymax ovlp))
+	       (if (neq? bxyzz 1) (set! ovlpzmax ovlp))
+	       (define-int ismiddle (and (and (== bxyzx 1) (== bxyzy 1)) (== bxyzz 1)))
+	       (if ismiddle
+		 (begin (set! ovlpxmax xblock) (set! ovlpymax yblock) (set! ovlpzmax zblock)))
+	       (define-size_t ovlp_all_len (* ovlpxmax ovlpymax ovlpzmax num_ele numvec))
+	       (set! (vector-ref (structp-ref pthis sync_layer_pscmc) i) (TYPE_MALLOC ,(multi-concat rt "pscmc_mem") 1))
+	       (set! (vector-ref (structp-ref pthis swap_layer_pscmc) i) (TYPE_MALLOC ,(multi-concat rt "pscmc_mem") 1))
+
+	       (if (and ,(if USE-ALL-IN-ONE-SYNC-LAYER 1 0) (not ismiddle))
+		  (incf! ovleal_aio ovlp_all_len)
+		  (begin 
+		     (,(multi-concat rt "pscmc_mem_init") pe (vector-ref (structp-ref pthis sync_layer_pscmc) i) PS_DOUBLE_NUM ovlp_all_len)
+		     (,(multi-concat rt "pscmc_mem_init") pe (vector-ref (structp-ref pthis swap_layer_pscmc) i) PS_DOUBLE_NUM ovlp_all_len)
+		     ))
+	       ;(,(multi-concat rt "pscmc_mem_init") pe (vector-ref (structp-ref pthis cur_rank_x_pscmc) i) PS_DOUBLE_NUM ovlp_all_len)
+	       )
+	     ,(if USE-ALL-IN-ONE-SYNC-LAYER
+		`(begin
+		   (,(multi-concat rt "pscmc_mem_init") pe (vector-ref (structp-ref pthis sync_layer_pscmc) 0) PS_DOUBLE_NUM ovleal_aio)
+		   (,(multi-concat rt "pscmc_mem_init") pe (vector-ref (structp-ref pthis swap_layer_pscmc) 0) PS_DOUBLE_NUM ovleal_aio)
+		   ) 0
+		)
+	     (set! (structp-ref pthis main_data) (vector-ref (structp-ref pthis sync_layer_pscmc) (/ NUM_SYNC_LAYER 2)))
+	     (set! (structp-ref pthis rdcd) (TYPE_MALLOC ,(multi-concat rt "pscmc_mem") 1))
+	     (,(multi-concat rt "pscmc_mem_init") pe (structp-ref pthis rdcd) PS_DOUBLE_NUM numvec)
+	     (set! (structp-ref pthis rdcd_host) (,(multi-concat rt "pscmc_get_h_data") (structp-ref pthis rdcd) NULL))
+	     (if is_init_kernels
+	       (begin
+		 ,(begin-map (lambda (x) ((car x) rt)) array-funs)
+		 (begin . 
+		   ,(let loop ((ovlp_kernels (append ovlp_kernels)) (n 0))
+		      (cond
+			((null? ovlp_kernels) '())
+			(else
+			  (lcons 
+			    `(block
+			       (declare size_t structlen)
+			       (,(multi-concat rt (car ovlp_kernels) "_get_struct_len") ("&" structlen))
+			       (vector-set! (structp-ref pthis sync_kernels) ,n (malloc structlen))
+			       )
+			    `(,(multi-concat rt (car ovlp_kernels) "_init") pe (vector-ref (structp-ref pthis sync_kernels) ,n)) 
+			    (loop (cdr ovlp_kernels) (+ n 1)))
+			  )
+			)
+		      ))
+		 (begin . 
+		   ,(let loop ((fdtd_kernels fdtd_kernels) (n 0))
+		      (cond
+			((null? fdtd_kernels) '())
+			(else
+			  (lcons 
+			    `(block
+			       (declare size_t structlen)
+			       (,(multi-concat rt (car fdtd_kernels) "_get_struct_len") ("&" structlen))
+			       (vector-set! (structp-ref pthis fdtd_kernels) ,n (malloc structlen))
+			       )
+			    `(,(multi-concat rt (car fdtd_kernels) "_init") pe (vector-ref (structp-ref pthis fdtd_kernels) ,n)) 
+			    (loop (cdr fdtd_kernels) (+ n 1)))
+			  )
+			)
+		      ))
+		 (begin . 
+		   ,(append
+		      (gen-pscmc-kernel-vector rt 
+			(map 
+			  (lambda (kn)
+			    `(,(concat kn 'kernels)
+			       ,(map 
+				  (lambda (x)
+				    (apply multi-concat (cons kn x))
+				    ) `(() (x) (y) (z) (x y) (x z) (y z) (x y z))))  
+			       ) yee_abc_names)
+			)
+		      ))))
+		 (begin . 
+		   ,(gen-pscmc-vars-scal rt 
+		     (apply append 
+		       (map
+			 (lambda (x)
+			   `((,(multi-concat 'cur_rank x '_pscmc) int numvec)
+			      (,(multi-concat x 'offset) int numvec)
+			      )
+			   )
+			 '(x y z)
+			 )
+		       )
+		     )
+		   )
+		 
+	     (return 0)
+	     )
+	   (begin . 
+	     ,(let loop ((ovlp_kernels ovlp_kernels) (n 0))
+		(cond
+		  ((null? ovlp_kernels) '())
+		  (else
+		    (define kername (car ovlp_kernels))
+		    (cons
+		      `(begin 
+			 (defun-class-Field3D_Seq ,(multi-concat rt 'Field3D_Seq_ovlp_ kername) int ((int is_sync_layer))
+			   ,(cond
+			      ((or (is-once-kernel? kername) (is-all-in-one-kernel? kername))
+				`(begin
+				   ,(if (is-once-kernel? kername)
+				      (begin-map-n 
+					(lambda (g x)
+					  (if (eq? g 13) '()
+					    `(,(multi-concat rt kername '_scmc_set_parameter_vecovlp (number->string g)) (vector-ref sync_kernels ,n) (vector-ref (if is_sync_layer sync_layer_pscmc swap_layer_pscmc) ,g))
+					    )
+					  ) 
+					(vector->list (make-vector 27)))
+				      `(,(multi-concat rt kername '_scmc_set_parameter_vecovlps) (vector-ref sync_kernels ,n) (vector-ref (if is_sync_layer sync_layer_pscmc swap_layer_pscmc) 0))
+				      )
+				   (,(multi-concat rt kername '_scmc_set_parameter_vecmain) (vector-ref sync_kernels ,n) main_data)
+				   ,(with-kernel-parameters rt kername 
+				      kernel-nonvec-vars `(vector-ref sync_kernels ,n)
+				      `(,(multi-concat rt kername '_exec) (vector-ref sync_kernels ,n) 
+					 (,(multi-concat rt kername '_get_xlen)) 
+					 numvec)
+				      )
+				   ))
+			      (else
+				`(begin
+				   (define i 0)
+				   (for i=0 (< i NUM_SYNC_LAYER) i++
+				     (if (neq? i (/ NUM_SYNC_LAYER 2))
+				       (block
+					 (define-int ovlpindex i)
+					 (define-long ylen numvec)
+					 (if is_sync_layer
+					   (,(multi-concat rt kername '_scmc_set_parameter_vecovlp) (vector-ref sync_kernels ,n) (vector-ref sync_layer_pscmc i))
+					   (,(multi-concat rt kername '_scmc_set_parameter_vecovlp) (vector-ref sync_kernels ,n) (vector-ref swap_layer_pscmc i))
+					   )
+					 (,(multi-concat rt kername '_scmc_set_parameter_vecmain) (vector-ref sync_kernels ,n) main_data)
+					 ,(with-kernel-parameters rt kername (lcons '(int ovlpindex) kernel-nonvec-vars) `(vector-ref sync_kernels ,n)
+					    `(,(multi-concat rt (car ovlp_kernels) '_exec) (vector-ref sync_kernels ,n) 
+					       (,(multi-concat rt kername '_get_xlen)) 
+					       numvec)
+					    ))
+				       )
+				     )
+				   (return 0))))
+			   )
+			 
+			 ) (loop (cdr ovlp_kernels) (+ n 1)))))
+		)
+	     )
+	   ,(begin-map (lambda (x) ((cadr x) rt)) array-funs)
+	   (begin . 
+	     ,(let loop ((fdtd_kernels fdtd_kernels) (fdtd-kernel-out-args fdtd-kernel-out-args) (fdtd-kernel-vec-args fdtd-kernel-vec-args) (n 0))
+		(cond
+		  ((null? fdtd_kernels) '())
+		  (else
+		    (define kername (car fdtd_kernels))
+		    (define outargs (car fdtd-kernel-out-args))
+		    (define vecargs (reverse (car fdtd-kernel-vec-args)))
+		    (define outvecargs 
+		      (let loop ((vargs vecargs))
+			(cond
+			  ((null? vargs) '())
+			  ((equal? (caar vargs) 'double ) 
+			    (define avargs (car vargs))
+			    (set! vecargs (cdr vecargs))
+			    (cons avargs (loop (cdr vargs))))
+			  (else '())
+			  )
+		      ))
+		    (set! vecargs (reverse vecargs))
+		    ;(write (list outvecargs kername vecargs) current-error-port) (write-string "\n" current-error-port)
+		    (cons
+		      `(begin 
+			 (defun-class-Field3D_Seq ,(multi-concat rt 'Field3D_Seq_ kername) int ((Field3D_Seq* inEB) . ,(append (map (lambda (x) `(Field3D_Seq* ,(cadr x))) outvecargs) outargs))
+
+			   (,(multi-concat rt kername '_scmc_set_parameter_outEB) (vector-ref fdtd_kernels ,n) main_data)
+			   (,(multi-concat rt kername '_scmc_set_parameter_inEB) (vector-ref fdtd_kernels ,n) inEB->main_data)
+			   ,(begin-map 
+			      (lambda (x)
+				(set! x (cadr x))
+				`(,(multi-concat rt kername '_scmc_set_parameter_ x) (vector-ref fdtd_kernels ,n) (structp-ref ,x main_data))
+				) outvecargs)
+			   ,(begin-map 
+			      (lambda (x) 
+				(multi-define type name x)
+				`(,(multi-concat rt kername '_scmc_set_parameter_ name) (vrf fdtd_kernels ,n) ,name)
+				) vecargs)
+			   (define XLEN xlen)
+			   (define YLEN ylen)
+			   (define ZLEN zlen)
+			   (define-long y_cpu_core numvec)
+			   ,(with-kernel-parameters rt kername 
+			      `((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock) (int num_ele) . ,outargs)
+			      `(vector-ref fdtd_kernels ,n)
+			      `(,(multi-concat rt kername '_exec) (vector-ref fdtd_kernels ,n) 
+				 (,(multi-concat rt kername '_get_xlen)) 
+				 numvec)
+			      ) 
+			   (return 0)
+			   )
+			 ) (loop (cdr fdtd_kernels) (cdr fdtd-kernel-out-args) (cdr fdtd-kernel-vec-args) (+ n 1)))))
+		)
+	     )
+	   )
+	)
+      runtimes
+      )
+    )
+  )
+(defun-class-Field3D_Seq command_flush_Field3D_Seq int ()
+  (choose_the_runtime (command_flush pthis))
+  )
+(defun-class-Field3D_Seq alloc_Field3D_Seq int ((int is_init_kernels))
+  (choose_the_runtime (alloc_Field3D_Seq pthis is_init_kernels))
+  (alloc_Field3D_Seq_dmonly pthis is_init_kernels)
+  (alloc_Field3D_Seq_hydroAonly pthis is_init_kernels)
+  (return 0)
+  )
+(defun-class-Field3D_Seq delete_Field3D_Seq int ()
+  (choose_the_runtime (delete_Field3D_Seq pthis))
+  (return 0)
+  )
+(eval-scmc-global 
+  (begin-map
+    (lambda (kername)
+      `(defun-class-Field3D_Seq ,(multi-concat 'Field3D_Seq_ovlp_ kername) int ((int is_sync_layer))
+	 (choose_the_runtime (,(multi-concat 'Field3D_Seq_ovlp_ kername) pthis is_sync_layer))
+	 (return 0)
+	 )
+      )
+    ovlp_kernels 
+    ))
+(eval-scmc-global
+  `(begin . 
+     ,(map
+    (lambda (kername outargs vecargs)
+      (define vecargs (reverse vecargs))
+      (define outvecargs 
+	(let loop ((vargs vecargs))
+	  (cond
+	    ((null? vargs) '())
+	    ((equal? (caar vargs) 'double ) 
+	      (define avargs (car vargs))
+	      (set! vecargs (cdr vecargs))
+	      (cons `(Field3D_Seq* ,(cadr avargs)) (loop (cdr vargs))))
+	    (else '())
+	    )
+	  ))
+      (define newoutargs (append outvecargs outargs))
+      ;(write (list kername outvecargs newoutargs vecargs) current-error-port) (newline current-error-port)
+      `(defun-class-Field3D_Seq ,(multi-concat 'Field3D_Seq_ kername) int ((Field3D_Seq* inEB) . ,newoutargs)
+	 (choose_the_runtime (,(multi-concat 'Field3D_Seq_ kername) pthis inEB . ,(map (lambda (x) (cadr x)) newoutargs)))
+	 (return 0)
+	 )
+      )
+    fdtd_kernels fdtd-kernel-out-args fdtd-kernel-vec-args)
+    ))
+(eval-scmc-global 
+  `(begin
+     ,(begin-map (lambda (x) ((caddr x))) array-funs)
+     ,(gen-field3d-mpi-shell "" 
+	`(((Field3D_MPI* inEB) (double deltat)) ((+ (structp-ref inEB data) i) damp_vars deltat)
+	   ,(let loop ((yees '("" x y z xy xz yz xyz)) (n 0))
+	      (cond
+		((null? yees) '())
+		(else
+		  (append
+		    (begin
+		      (define yee (car yees))
+		      (map 
+			(lambda (yee_abc_name)
+			  `(,(multi-concat yee_abc_name yee) (vector-ref yee_abc_kernels ,n) ((Field3D_Seq* inEB) (double damp_vars) (double deltat)) ((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock) (int num_ele) (double damp_vars) (double deltat)) 
+			 ,(lambda (rt kername ker_structp) 
+			    `(begin 
+			       (,(multi-concat rt kername '_scmc_set_parameter_outEB) ,ker_structp main_data)
+			       (,(multi-concat rt kername '_scmc_set_parameter_inEB) ,ker_structp inEB->main_data)
+			       (,(multi-concat rt kername '_scmc_set_parameter_cur_rankx) ,ker_structp cur_rankx_pscmc)
+			       (,(multi-concat rt kername '_scmc_set_parameter_cur_ranky) ,ker_structp cur_ranky_pscmc)
+			       (,(multi-concat rt kername '_scmc_set_parameter_cur_rankz) ,ker_structp cur_rankz_pscmc)
+			       (define XLEN xlen)
+			       (define YLEN ylen)
+			       (define ZLEN zlen)
+			       (define-long y_cpu_core numvec)
+			       )
+			    ) 
+			 )
+			  )
+			yee_abc_names)
+		      
+		      ) (loop (cdr yees) (+ n 1))))) 
+	      )
+	   )
+	)
+     )
+  )

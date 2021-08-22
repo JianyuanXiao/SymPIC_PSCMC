@@ -1,0 +1,23 @@
+;paravec.scmc general_macros.scmc fdtd_helper.scmc mur_abc.kernel.def.ss yeefdtd.kernel.def.ss dm.kernel.def.ss multi-array-pscmc.scmc dmbihamt.kernel.def.ss
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") (load "multi-array-pscmc.scmc") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(include< "assert.h")
+;(include- "c_/c_pscmc_inc.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include- "space_filling_curve.h")
+(include- "mpifields.h")
+
+(input-scmc "fdtd_helper.scmc")
+
+(gen-kernel-set hydroA defaults "hydro_A.kernel.def.ss")
+(eval-scmc-global
+  (gen-array-funs
+    ;(append (gen-local-array-funs hydroA hydroA_kernels (alpha_beta_new alpha_beta rho_s_vx vA)))
+    (append (gen-local-array-funs hydroA hydroA_kernels ()))
+    'hydroAonly)
+  )

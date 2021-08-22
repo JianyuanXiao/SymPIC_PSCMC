@@ -1,0 +1,56 @@
+(input-scmc "../general_macros.scmc")
+;(include< "stdio.h")
+(input-include "local_header.h")
+(input-scmc "../simd_intrin_config.scmc")
+(input-scmc "../particle_macros.scmc")
+(eval-scmc-global
+  (begin
+    (load "../decscheme.ss")
+    (load "../multi-map.ss") 
+    (load "../Bproc_macros.scmc")
+    (define rel_vars '((double* inoutput) (int* xyzw) (double* cu_cache) (int* cu_xyzw) (int* xoffset) (int* yoffset) (int* zoffset) (double* fieldE) (double* fieldB) (double* fieldB1) (double* FoutJ) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long numvec) (int num_ele) (long grid_cache_len) (long cu_cache_length) (double DELTA_X) (double DELTA_Y) (double DELTA_Z) (double Mass0) (double Charge0 ) (double Deltat) (double Tori_X0) (double Solve_Err)))
+    (define rel_vars_smallgrid (replace-all rel_vars 'FoutJ 'LFoutJ))
+    
+    (define (gen_1st_dual_kernels_small_grid gen_rel_name rel_vars_smallgrid)
+      (begin-map
+	(lambda (name rel_file addJ use_tori)
+	  `(begin
+	     ,(gen_push_kernel_small_grids name rel_vars_smallgrid
+	       (kernel_gen_imifun rel_file addJ #t use_tori)
+	       defJ01 IDX_LCL_SPEC_LEN
+	       )
+	     ,(gen_push_kernel_small_grids (multi-concat name '_sg2) rel_vars_smallgrid
+	       (kernel_gen_imifun rel_file addJ 2 use_tori)
+	       defJ01 IDX_LCL_SPEC_LEN
+	       )
+	     )
+	  )
+	(list 
+	  (concat gen_rel_name '_fwd) 
+	  (concat gen_rel_name '_bwd)
+	  'relng_1st
+	  )
+	`("../rel_fwd.ss" "../rel_bwd.ss" "../relng.ss")
+	(list
+	  INCFJ0_TREL_FWD
+	  INCFJ0_TREL_BWD
+	  INCFJ0_RELNG
+	  )
+	(list #t #t #f)
+	)
+      )
+    `(begin
+       ,(if (and USE_INTRIN (isinlst RUNTIME '(C COI OpenMP)))
+	  `(include< ,SIMD_HEADER)
+	  '()
+	  )
+       (defun mass_floorx int ((double x))
+	 (define-int ax x)
+	 (if (> ax x) (incf! ax -1))
+	 ;(assert (<= ax x))
+	 (return ax)
+	 )
+       ,(gen_1st_dual_kernels_small_grid 'geo_rel_1st rel_vars_smallgrid)
+       )
+    )
+  )

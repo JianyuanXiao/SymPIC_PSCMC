@@ -1,0 +1,200 @@
+;paravec.scmc general_macros.scmc pic_helper.scmc
+
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include< "math.h")
+(include- "blas_shell.h")
+(include< "cgapsio.h")
+(include- "mpi_fieldio.h")
+(include- "cfgcst.h")
+(include- "call_curl_kernel.h")
+(include- "run_particle.h")
+(include- "sync_fields.h")
+
+
+(dec-fun wclk_now double ())
+
+(define-scmc-global gen_shell_call
+  (lambda (fun_name fun_variables fun_variables_scalar use_abs_Charge . numvec_xlen_partype) 
+    (define thexlen `(choose_the_runtime (,(multi-concat fun_name '_get_xlen))))
+    (define finfun_name (multi-concat fun_name (if use_abs_Charge '_abs_charge "")))
+    (define n1 'numvec)
+    (define partype 0)
+    (if (null? numvec_xlen_partype)
+      0
+      (begin
+	(set! n1 (car numvec_xlen_partype))
+	(if (null? (cdr numvec_xlen_partype))
+	  0
+	  (begin
+	    (set! thexlen (cadr numvec_xlen_partype))
+	    (if (null? (cddr numvec_xlen_partype))
+	      0
+	      (set! partype (caddr numvec_xlen_partype))
+	      )
+	    )
+	  )
+	)
+      )
+    ;(define n1 (if (null? numvec_xlen) 'numvec (car numvec_xlen)))
+    `(begin
+       ,(begin-map
+	  (lambda (rt)
+	    `(begin
+	       (defun-class-One_Particle_Collection ,(multi-concat rt finfun_name) int ((int SPEC) (int NUM_SPEC) (double Deltat))
+		 (class-header-Field3D_Seq pfield)
+		 (define-long the_xlen ,thexlen)
+		 ;(define-long the_xlen 1)
+		 (define XLEN xlen)
+		 (define YLEN ylen)
+		 (define ZLEN zlen)
+		 (define DELTA_X delta_x)
+		 (define DELTA_Y delta_y)
+		 (define DELTA_Z delta_z)
+		 (define-void* fieldE (structp-ref pfieldE main_data))
+		 (define-void* fieldB (structp-ref pfieldB main_data))
+		 (define-void* FoutJ (structp-ref pFoutJ main_data))
+		 (define-void* LFoutJ (if pLFoutJ (structp-ref pLFoutJ main_data) NULL))
+		 (define-void* FoutEN (structp-ref pFoutEN main_data))
+		 ,(begin-map
+		    (lambda (qv)
+		      (define qvname (car qv))
+		      `(,(multi-concat rt fun_name '_scmc_set_parameter_ qvname) ,(multi-concat fun_name '_kernel) ,qvname)
+		      )
+		    fun_variables
+		    )
+		 ,(if use_abs_Charge 
+		    `(begin 
+		       ;(LOG_RECORD_INFO "abs called\n")
+		       (set! Charge (fabs Charge ))
+		       ;(,(multi-concat rt fun_name '_scmc_set_parameter_ fieldE) ,(multi-concat fun_name '_kernel) )
+		       )
+		    '())
+		 ,(with-kernel-parameters-exec rt fun_name fun_variables_scalar (multi-concat fun_name '_kernel) 'the_xlen n1)
+		 (return 0)
+		 )
+	       ))
+	  (map car runtimes)
+	  )
+       (defun-class-One_Particle_Collection ,(concat finfun_name '_all) int ((int SPEC) (int NUM_SPEC) (double dt))
+	  (class-header-Field3D_Seq pfield)
+	  (choose_the_runtime (,finfun_name pthis SPEC NUM_SPEC dt))
+	  (return 0)
+	  )
+       (defun-class-Particle_in_Cell_MPI ,(concat finfun_name '_mpi) int ((double dt0))
+	 (define-int num_spec (struct-ref MPI_fieldE num_spec))
+	 (define-int num_runtime (struct-ref MPI_fieldE num_runtime))
+	 (for-from-zero-to i (* num_runtime num_spec)
+	   (define ptype (vrf o_particle_type (/ i num_runtime)))
+	   (if (or ,(if (isinlst finfun_name '(dump_ene_num calculate_rho)) 1 0) (eq? ptype 0)) 
+	     (,(concat finfun_name '_all) (+ (struct-ref MPI_fieldE particles) i) (/ i num_runtime) num_spec dt0)))
+	 (return 0)
+	 )
+       ))
+  )
+
+
+(eval-scmc-global
+  (begin
+    (multi-define split_vec_args split_scal_args (get_vec_scal_args "particle_iter.kernel.def.ss" 'a))
+    ;(write (list split_vec_args split_scal_args) current-error-port)
+    ;(newline current-error-port)
+    `(begin 
+       ,(begin-map 
+	 (lambda (fn) 
+	   `(begin 
+	      ,(gen_shell_call fn split_vec_args split_scal_args #f)
+	      ,(gen_shell_call fn split_vec_args split_scal_args #t))
+	   )
+	 (append (map (lambda (x) (concat 'split_pass_ x)) '(x y z x_vlo y_vlo z_vlo x_nopush y_nopush z_nopush x_vlo_nopush y_vlo_nopush z_vlo_nopush)) '(split_pass_E_particle_vlo split_pass_E_particle dump_ene_num calculate_rho))
+	 )
+       ,(begin-map 
+	 (lambda (fn) 
+	   (define fn_sg (concat fn '_small_grids))
+	   (define split_vec_args_sg (replace-all split_vec_args 'FoutJ 'LFoutJ))
+	   (gen_shell_call fn_sg split_vec_args_sg split_scal_args #f '(* numvec XLEN YLEN ZLEN))
+	   )
+	 (append (map (lambda (x) (concat 'split_pass_ x)) '(x y z  x_sg2 y_sg2 z_sg2 x_vlo y_vlo z_vlo  x_vlo_sg2 y_vlo_sg2 z_vlo_sg2 x_vlo_sg2_nopush y_vlo_sg2_nopush z_vlo_sg2_nopush)))
+	 )
+       )
+    ))
+(eval-scmc-global 
+  (begin-map 
+    (lambda (fun_name)
+      `(begin
+	 (defun-class-Particle_in_Cell_MPI ,(concat fun_name '_mpi_shell_nouse) int ((double dt0))
+	   (blas_yiszero_Field3D_MPI pMPI_FoutJ pMPI_FoutJ)
+	   (sync_ovlp_mpi_field pMPI_FoutJ)
+	   (LOG_RECORD_INFO "run nsmall grid\n")
+	   (if use_small_grid
+	     (begin
+	       (blas_yiszero_Field3D_MPI ("&" MPI_LFoutJ) ("&" MPI_LFoutJ))
+	       (LOG_RECORD_INFO "run small grid\n")
+	       (,(concat fun_name '_small_grids_mpi) pthis dt0)
+
+	       (MPI_merge_current pMPI_FoutJ ("&" MPI_LFoutJ))
+	       )
+	     (,(concat fun_name '_mpi) pthis dt0)
+	     )
+	   (merge_ovlp_mpi_field pMPI_FoutJ)
+	   (return 0)
+	   )
+	 )
+      )
+    (map (lambda (x) (concat 'split_pass_ x)) '(x y z))
+    ))
+(eval-scmc-global 
+
+  `(begin 
+     ,(begin-map 
+	(lambda (x) 
+	  (define name (multi-concat 'split_pass_ x '_mpi_multi_runtime))
+	  `(defun-class-Particle_in_Cell_MPI ,name int ((double dt0))
+	     (cond
+	       (use_vlo 
+		 (cond 
+		   ((eq? use_small_grid 1) (,(multi-concat 'split_pass_ x '_vlo '_small_grids_mpi) pthis dt0))
+		   ((eq? use_small_grid 2) (,(multi-concat 'split_pass_ x '_vlo_sg2 '_small_grids_mpi) pthis dt0))
+		   (else (,(multi-concat 'split_pass_ x '_vlo_mpi) pthis dt0))
+		   ))
+	       (else
+		 (cond
+		   ((eq? use_small_grid 1) (,(multi-concat 'split_pass_ x '_small_grids_mpi) pthis dt0))
+		   ((eq? use_small_grid 2) (,(multi-concat 'split_pass_ x '_sg2 '_small_grids_mpi) pthis dt0))
+		   (else (,(multi-concat 'split_pass_ x '_mpi) pthis dt0)))
+		 )
+	       )
+	     (return 0)
+	     )
+	  ) '(x y z))
+     ,(begin-map
+	(lambda (x)
+	  (define name (multi-concat 'split_pass_ x '_nopush_mpi_multi_runtime))
+	  `(defun-class-Particle_in_Cell_MPI ,name int ((double dt0) )
+	     (cond
+	       (use_vlo
+		 (cond
+		   (use_small_grid (,(multi-concat 'split_pass_ x '_vlo_sg2_nopush_small_grids_mpi) pthis dt0))
+		   (else (,(multi-concat 'split_pass_ x '_vlo_nopush_mpi) pthis dt0))
+		   )
+		 )
+	       (else
+		 (cond
+		   (use_small_grid (LOG_RECORD_INFO "Error: no such runtime for small grid\n"))
+		   (else (,(multi-concat 'split_pass_ x '_nopush_mpi) pthis dt0))
+		   )
+		 )
+	       )
+	     )
+	  ) '(x y z)
+	)
+
+     ) 
+  )
+
+

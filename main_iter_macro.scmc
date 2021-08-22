@@ -1,0 +1,415 @@
+(define default-milp-list 
+  `(
+     (CalB . 
+       (begin 
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 1.0 pMPI_fieldB1)
+	 (MPI_YEE_CURL_R ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldE) DELTAT);this procedure will sync fieldE automatically 
+	 )) 
+     (AddExtEB . 
+       (begin
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldE) 1 ("&" ppis->MPI_fieldE_ext))
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB) 1 ("&" ppis->MPI_fieldB_ext))
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldB1) 1 ("&" ppis->MPI_fieldB_ext)
+	   )))
+     (SetFoutJ0 .
+       (if (not G_USE_CALC_EQ_B)
+	 (blas_yiszero_synced_Field3D_MPI ("&" ppis->MPI_FoutJ) ("&" ppis->MPI_FoutJ)))
+       )
+     (SyncEB . 
+       (begin 
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldE))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldB))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldB1))
+	 )
+       )
+     (PushPar . 
+       (if M_USE_VLO 
+	 (MPI_slab_nr_Bfield_pushJ_vlo ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg (* 0.5 DELTAT) 0 0 0 0 0 0)
+	 (MPI_slab_nr_Bfield_pushJ  ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg (* 0.5 DELTAT) 0 0 0 0 0 0)
+	 )
+       )
+     (SortPar .
+       (if (eq? (remainder t num_multi_step_sort) 0)
+	 (begin
+	   (call_particle_sort_mpi ppis 0 0)
+	   (PERFORMANCE_TIME "sort x particle")
+	   (call_particle_sort_mpi ppis 1 0)
+	   (PERFORMANCE_TIME "sort y particle")
+	   (call_particle_sort_mpi ppis 2 0)
+	   (PERFORMANCE_TIME "sort z particle")))
+       )
+     (MergeJ . 
+       (if (not (and G_USE_CALC_EQ_B (> t t0)))
+	 (merge_ovlp_mpi_field ("&" ppis->MPI_FoutJ))
+	 ))
+     (CalDEDT . (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldE) -1 ("&" ppis->MPI_FoutJ)))
+     (SubExtEB . 
+       (begin
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldE) -1 ("&" ppis->MPI_fieldE_ext))
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB) -1 ("&" ppis->MPI_fieldB_ext))
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldB1) -1 ("&" ppis->MPI_fieldB_ext)
+	   )))
+     (CalE . (MPI_RECT_YEE_CURL_L ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) M_DELTA_Z M_DELTA_Y M_DELTA_X DELTAT))
+     (PMLABC .
+       (begin
+	 (class-header-Particle_in_Cell_MPI ppis)
+	 (class-header-Field3D_Seq (struct-ref MPI_fieldE data))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldPMLB))
+	 (MPI_PML_FDTD_CURL_BWD ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldPMLE) ("&" ppis->MPI_fieldPMLB) DELTAT 0 0 delta_x delta_y delta_z G_USE_PML_ABC_DIR G_PML_LEVEL 3 G_PML_SIGMA_MAX allxmax allymax allzmax) 
+	 )
+       )
+     (MURABC .
+       (MPI_Yee_FDTD_MUR_ABC ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldEtmp) DELTAT G_USE_ABC_DIR G_USE_PEC_DIR G_USE_DAMP_DIR 0)
+       )
+     (CPVAR . ()
+       ;(blas_yisax_Field3D_MPI ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB) 1 ("&" ppis->MPI_fieldB1))
+       )
+     )
+  )
+(define (gen-main-iter-loop-proc milp)
+  (define cond-var (car milp))
+  (set! milp (cdr milp))
+  (define (find-milp var)
+    (fast-find-var-in-single-env var milp)
+    )
+  `(,cond-var
+     (begin . ,(map (lambda (x) `(define-Field3D_MPI* ,(concat 'p x) ("&" (structp-ref ppis ,x)))) '(MPI_fieldB1 MPI_fieldE1 MPI_fieldB MPI_fieldE MPI_fieldEtmp1 MPI_fieldEtmp MPI_fieldE_ext MPI_fieldB_ext MPI_fieldBtmp1 MPI_FoutJ MPI_fieldPMLE MPI_fieldPMLB MPI_fieldE01_2x MPI_fieldB0_2x)))
+     (begin . 
+       ,(map 
+	  (lambda (x) 
+	    `(begin 
+	       ,(find-milp x)
+	       ,(if (eq? x 'SortPar) '()  `(PERFORMANCE_TIME  ,(multi-concat "" cond-var " " x)))
+	       )) '(CalB AddExtEB SetFoutJ0 SyncEB PushPar SortPar MergeJ CalDEDT SubExtEB)))
+     (if USE_NP_BOUNDARY
+       (if G_USE_PML_ABC_DIR
+	 ,(find-milp 'PMLABC)
+	 ,(find-milp 'MURABC)
+	 )
+       ,(find-milp 'CalE)
+       )
+     ,(find-milp 'CPVAR)
+     )
+  )
+(define (make-milp-map cond-var new-map)
+  (define default-milp
+    (fast-make-single-env-from-var-and-val default-milp-list)
+    )
+  (define default-milp-names (map car default-milp-list))
+  (map 
+    (lambda (x)
+      (define name (car x))
+      (define mps (cdr x))
+      (if (isinlst name default-milp-names)
+	(add-binding-in-single-env (cons name mps) default-milp)
+	(write-string (multi-concat "Warning: invalid name in milp " name "\n") current-error-port)
+	)
+      ) new-map)
+  (cons cond-var default-milp)
+  )
+(define default-milp (make-milp-map 'G_USE_INNER_SPLIT '()))
+(define milps (list default-milp))
+(define (add-milp-map cond-var new-map)
+  (set! milps (cons (make-milp-map cond-var new-map) milps))
+  )
+(define (gen-all-milp else-expr)
+  (cons 'cond
+    (append (map gen-main-iter-loop-proc milps)
+      else-expr)
+     )
+  )
+(define (gen-vlo expr)
+  (define carexpr (car expr))
+  `(if M_USE_VLO
+     ,(cons carexpr (cddr expr))
+     ,(cons (cadr expr) (cddr expr))
+     )
+  )
+(define SUBCYCLE_ELECTRON_TYPE 4)
+(define SUBCYCLE_ION_TYPE 8)
+(define (generate_implicit_mpi_pushers use_mask)
+  (define mask (if use_mask '_mask ""))
+  (define mask_var (if use_mask '(mask) '()))
+  `(cond
+     (USE_TORI
+       (cond
+	 (G_USE_REL
+	   (,(concat 'MPI_implicit_2nd_tori_rel mask) ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg DELTAT T_TORI_X0 M_PARTICLE_SOLVE_ERR . ,mask_var)
+	   )
+	 (else
+	   (,(concat 'MPI_implicit_2nd_tori_nr mask) ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg DELTAT  T_TORI_X0 M_PARTICLE_SOLVE_ERR . ,mask_var)
+	   )
+	 ))
+     (else
+       (cond
+	 (G_USE_REL
+	   (,(concat 'MPI_implicit_2nd_slab_rel mask) ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg DELTAT T_TORI_X0 M_PARTICLE_SOLVE_ERR . ,mask_var)
+	   )
+	 (else
+	   ;(LOG_RECORD_INFO "%e\n" G_REL_SOLVE_ERR)
+	   (,(concat 'MPI_implicit_2nd_slab_nr mask) ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg DELTAT T_TORI_X0 M_PARTICLE_SOLVE_ERR . ,mask_var)
+	   )
+	 )
+       )
+     )
+  )
+(add-milp-map 'M_USE_FULLY_IMPLICIT_ELECTRON
+  `(
+     (CalB . ())
+     (PushPar . 
+       (begin 
+	 ;(LOG_RECORD_INFO "OK here bef mask\n")
+	 (block
+	   (MPI_choose_pusher_mask ppis pMPI_fieldE pMPI_fieldB pMPI_fieldB1 pMPI_FoutJ pmass pchg DELTAT T_TORI_X0 M_PARTICLE_SOLVE_ERR ,SUBCYCLE_ION_TYPE)
+	   )
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 0.5 pMPI_fieldB)
+	 (blas_axpy_Field3D_MPI pMPI_fieldB pMPI_fieldB 0.5 pMPI_fieldB1)
+	 (blas_yisax_Field3D_MPI ("&" ppis->MPI_fieldE1) ("&" ppis->MPI_fieldE1) 1 ("&" ppis->MPI_fieldE))
+	 (set_pusher_torix0_solveerr_and_mask ppis MPI_choose_pusher_mask T_TORI_X0 M_PARTICLE_SOLVE_ERR (+ ,SUBCYCLE_ELECTRON_TYPE 32) USE_TORI)
+	 (jfnk_newton_simple_mpi ("&" jns) pMPI_fieldE1)
+
+	 (block
+	   (MPI_choose_pusher_mask ppis pMPI_fieldEtmp1 pMPI_fieldB pMPI_fieldB1 pMPI_FoutJ pmass pchg DELTAT T_TORI_X0 M_PARTICLE_SOLVE_ERR (+ ,SUBCYCLE_ELECTRON_TYPE 64))
+	   )
+	 )
+       )
+     (CalE . 
+       (begin
+	 (MPI_YEE_CURL_R pMPI_fieldB  pMPI_fieldE  (* DELTAT 0.5))
+	 (MPI_YEE_CURL_R pMPI_fieldB1 pMPI_fieldE1 (* DELTAT 0.5))
+	 ))
+     (CalDEDT . ())
+     (MURABC .  ())
+     (PMLABC . ())
+     (CPVAR .
+       (begin
+	 (blas_yisax_Field3D_MPI pMPI_fieldE pMPI_fieldE 1 pMPI_fieldE1)
+	 )
+       )
+
+     )
+  )
+(add-milp-map 'M_USE_IMPLICIT_2ND
+  `(
+     (PushPar .
+       ,(generate_implicit_mpi_pushers #f)
+       )
+     )
+  )
+(add-milp-map 'M_USE_MULTI_SUBSTEP
+  `(
+     (CalB . 
+       (begin
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 1.0 pMPI_fieldB1)
+	 (blas_yiszero_synced_Field3D_MPI pMPI_fieldEtmp pMPI_fieldEtmp)
+	 (inner-for-from-to i 0 num_substep
+	   (blas_yisax_Field3D_MPI pMPI_fieldBtmp1 pMPI_fieldBtmp1 1.0 pMPI_fieldB1)
+	   (MPI_Yee_FDTD_Curl_E pMPI_fieldB1 pMPI_fieldE dt_substep)
+	   (blas_axpy_Field3D_MPI pMPI_fieldEtmp pMPI_fieldEtmp dt_substep/DELTAT pMPI_fieldE)
+	   (blas_yiszero_synced_Field3D_MPI pMPI_FoutJ pMPI_FoutJ)
+	   (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldE 1  ("&" ppis->MPI_fieldE_ext))
+	   (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldBtmp1 1  ("&" ppis->MPI_fieldB_ext))
+	   (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldB1 1  ("&" ppis->MPI_fieldB_ext))
+	   (sync_ovlp_mpi_field pMPI_fieldBtmp1)
+	   (sync_ovlp_mpi_field pMPI_fieldB1)
+	   (sync_ovlp_mpi_field pMPI_fieldE)
+	   (if M_USE_VLO
+	     (MPI_slab_nr_Bfield_pushJ_vlo_mask ppis pMPI_fieldE pMPI_fieldBtmp1 pMPI_fieldB1 pMPI_FoutJ pmass pchg (* 0.5 dt_substep) 0 0 0 0 0 0 ,SUBCYCLE_ELECTRON_TYPE)
+	     (MPI_slab_nr_Bfield_pushJ_mask ppis pMPI_fieldE pMPI_fieldBtmp1 pMPI_fieldB1 pMPI_FoutJ pmass pchg (* 0.5 dt_substep) 0 0 0 0 0 0 ,SUBCYCLE_ELECTRON_TYPE)
+	     )
+	   ;(LOG_RECORD_INFO "OK Here %d\n" i)
+	   (if (eq? (remainder e_numstep num_sort_e_substep) 0)
+	     (begin
+	       (call_particle_sort_mpi_mask ppis 0 0 ,SUBCYCLE_ELECTRON_TYPE)
+	       (PERFORMANCE_TIME "sort x e-particle")
+	       (call_particle_sort_mpi_mask ppis 1 0 ,SUBCYCLE_ELECTRON_TYPE)
+	       (PERFORMANCE_TIME "sort y e-particle")
+	       (call_particle_sort_mpi_mask ppis 2 0 ,SUBCYCLE_ELECTRON_TYPE)
+	       (PERFORMANCE_TIME "sort z e-particle")
+	       )
+	     )
+	   (incf! e_numstep)
+	   (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldE -1 ("&" ppis->MPI_fieldE_ext))
+	   (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldBtmp1 -1 ("&" ppis->MPI_fieldB_ext))
+	   (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldB1 -1 ("&" ppis->MPI_fieldB_ext))
+
+	   (if (neq? i (- num_substep 1))
+	     (begin
+	       (merge_ovlp_mpi_field pMPI_FoutJ)
+	       (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldE -1 pMPI_FoutJ)))
+	   )
+	 ;(blas_yisax_Field3D_MPI pMPI_fieldE pMPI_fieldE 1 pMPI_fieldEtmp)
+	 )
+       )
+     (SetFoutJ0 . ())
+     (SyncEB . 
+       (begin 
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldEtmp))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldB))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldB1))
+	 )
+       )
+     (AddExtEB . 
+       (begin
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldEtmp) ("&" ppis->MPI_fieldEtmp) 1 ("&" ppis->MPI_fieldE_ext))
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB) 1 ("&" ppis->MPI_fieldB_ext))
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldB1) 1 ("&" ppis->MPI_fieldB_ext)
+	   )))
+     (PushPar . 
+       (begin
+	 (if M_USE_VLO 
+	   (MPI_slab_nr_Bfield_pushJ_vlo_mask ppis pMPI_fieldEtmp pMPI_fieldB pMPI_fieldB1 pMPI_FoutJ pmass pchg (* 0.5 DELTAT) 0 0 0 0 0 0 ,SUBCYCLE_ION_TYPE)
+	   (MPI_slab_nr_Bfield_pushJ_mask ppis pMPI_fieldEtmp pMPI_fieldB pMPI_fieldB1 pMPI_FoutJ pmass pchg (* 0.5 DELTAT) 0 0 0 0 0 0 ,SUBCYCLE_ION_TYPE)
+	   )
+	 )
+       )
+     (SortPar .
+       (if (eq? (remainder t num_multi_step_sort) 0)
+	 (begin
+	   (call_particle_sort_mpi_mask ppis 0 0 ,SUBCYCLE_ION_TYPE)
+	   (PERFORMANCE_TIME "sort x particle")
+	   (call_particle_sort_mpi_mask ppis 1 0 ,SUBCYCLE_ION_TYPE)
+	   (PERFORMANCE_TIME "sort y particle")
+	   (call_particle_sort_mpi_mask ppis 2 0 ,SUBCYCLE_ION_TYPE)
+	   (PERFORMANCE_TIME "sort z particle")
+	   )
+	 )
+       )
+     (SubExtEB . 
+       (begin
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldEtmp) ("&" ppis->MPI_fieldEtmp) -1 ("&" ppis->MPI_fieldE_ext))
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB) -1 ("&" ppis->MPI_fieldB_ext))
+	 (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldB1) -1 ("&" ppis->MPI_fieldB_ext)
+	   )))
+     )
+  )
+
+(add-milp-map 'use_rel_ncr
+  `(
+     (CalB .
+       (begin
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 1.0 pMPI_fieldB1)
+	 (MPI_Yee_FDTD_Curl_E_4th pMPI_fieldB1 pMPI_fieldE (* DELTAT 0.5))
+	 )
+       )
+     (PushPar . 
+       (begin
+	 (MPI_Yee_FDTD_W04_1 ("&" ppis->MPI_fieldEtmp) pMPI_fieldE DELTAT)
+	 (MPI_Yee_FDTD_W04_2 ("&" ppis->MPI_fieldEtmp2) pMPI_fieldB1 DELTAT) ;tmp is E, tmp2 is B1
+	 (MPI_Yee_FDTD_W04_2 ("&" ppis->MPI_fieldBtmp)  pMPI_fieldB DELTAT) ;Btmp is B
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldEtmp))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldEtmp2))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldBtmp))
+	 (MPI_implicit_2nd_slab_rel ppis ("&" ppis->MPI_fieldEtmp) ("&" ppis->MPI_fieldBtmp) ("&" ppis->MPI_fieldEtmp2) ("&" ppis->MPI_FoutJ) pmass pchg (/ DELTAT 2) 0 G_REL_SOLVE_ERR)
+	 (merge_ovlp_mpi_field ("&" ppis->MPI_FoutJ))
+	 (MPI_Yee_FDTD_W04_1 ("&" ppis->MPI_fieldEtmp) ("&" ppis->MPI_FoutJ) DELTAT)
+	 (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldE -1 ("&" ppis->MPI_fieldEtmp))
+
+
+
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 1.0 pMPI_fieldB1)
+	 (MPI_Yee_FDTD_Curl_E_4th pMPI_fieldB1 pMPI_fieldE (* DELTAT 0.5))
+	 (MPI_Yee_FDTD_W04_1 ("&" ppis->MPI_fieldEtmp) pMPI_fieldE DELTAT)
+	 (MPI_Yee_FDTD_W04_2 ("&" ppis->MPI_fieldEtmp2) pMPI_fieldB1 DELTAT) ;tmp is E, tmp2 is B1
+	 (MPI_Yee_FDTD_W04_2 ("&" ppis->MPI_fieldBtmp)  pMPI_fieldB DELTAT) ;Btmp is B
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldEtmp))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldEtmp2))
+	 (sync_ovlp_mpi_field ("&" ppis->MPI_fieldBtmp))
+	 (blas_yiszero_synced_Field3D_MPI ("&" ppis->MPI_FoutJ) ("&" ppis->MPI_FoutJ)) 
+	 (MPI_implicit_2nd_slab_rel ppis ("&" ppis->MPI_fieldEtmp) ("&" ppis->MPI_fieldBtmp) ("&" ppis->MPI_fieldEtmp2) ("&" ppis->MPI_FoutJ) pmass pchg (/ DELTAT 2) 0 G_REL_SOLVE_ERR)
+	 )
+       )
+     (CalDEDT . 
+       (begin
+	 (MPI_Yee_FDTD_W04_1 ("&" ppis->MPI_fieldEtmp) ("&" ppis->MPI_FoutJ) DELTAT)
+	 (blas_axpy_Field3D_MPI pMPI_fieldE pMPI_fieldE -1 ("&" ppis->MPI_fieldEtmp))
+	 ))
+     (CalE .  
+       (MPI_Yee_FDTD_Curl_B_4th pMPI_fieldE pMPI_fieldB1 DELTAT))
+     )
+  )
+(add-milp-map 'M_USE_REL_2ND_SUBSTEP
+  `(
+     (PushPar .
+       (begin
+	 (MPI_relng_1st ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg (/ DELTAT 3) (* t T_TORI_X0) G_REL_SOLVE_ERR)
+	 (MPI_relng_1st ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg (/ DELTAT 3) (* t T_TORI_X0) G_REL_SOLVE_ERR)
+	 (MPI_relng_1st ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg (/ DELTAT 3) (* t T_TORI_X0) G_REL_SOLVE_ERR)
+	 )
+       ))
+  )
+(if #f
+(add-milp-map 'use_rel_ncr 
+  `(
+     (CalB . 
+       (begin
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 1.0 pMPI_fieldB1)
+	 (blas_yisax_shrink_Field3D_MPI pMPI_fieldE pMPI_fieldE 1 pMPI_fieldE01_2x)
+	 (MPI_Yee_FDTD_Curl_E_4th pMPI_fieldB0_2x pMPI_fieldE01_2x DELTAT)
+	 (MPI_YEE_CURL_R ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldE) (* 0.5 DELTAT))
+	 ;(MPI_Yee_FDTD_Curl_E_4th ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldE) DELTAT)
+	 )
+       )
+     (CalBHaha .
+       (begin
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 1.0 pMPI_fieldB1)
+	 (MPI_Yee_FDTD_Curl_E_4th pMPI_fieldB1 pMPI_fieldE DELTAT)
+	 )
+       )
+     (PushPar . 
+       (begin
+	 (MPI_implicit_2nd_slab_rel ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg (* DELTAT 0.5) 0 G_REL_SOLVE_ERR)
+
+	 )
+       )
+     (CalDEDT . (blas_axpy_enlarge_Field3D_MPI ("&" ppis->MPI_FoutJ) pMPI_fieldE01_2x -2 ("&" ppis->MPI_FoutJ)))
+     (CalE .  (MPI_Yee_FDTD_Curl_B_4th pMPI_fieldE01_2x pMPI_fieldB0_2x DELTAT))
+     ;(CalE .  (MPI_Yee_FDTD_Curl_B_4th pMPI_fieldE pMPI_fieldB1 DELTAT))
+
+     (CalEHaha .  (MPI_Yee_FDTD_Curl_B_4th pMPI_fieldE pMPI_fieldB1 DELTAT))
+     ;(CalE .  (MPI_RECT_YEE_CURL_L pMPI_fieldE01_2x pMPI_fieldB0_2x M_DELTA_Z M_DELTA_Y M_DELTA_X DELTAT))
+     
+     )
+  ) 0)
+(if #f
+(add-milp-map 'use_rel_ncr 
+  `(
+     (CalB . 
+       (begin
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 1.0 pMPI_fieldB1)
+	 ;(LOG_RECORD_INFO "OK here bef B\n")
+	 (blas_yisax_shrink_Field3D_MPI pMPI_fieldE pMPI_fieldE 1 pMPI_fieldE01_2x)
+	 ;(LOG_RECORD_INFO "OK here aft enlarge E\n")
+
+	 (MPI_Yee_FDTD_Curl_E_4th pMPI_fieldB0_2x pMPI_fieldE01_2x DELTAT)
+	 (MPI_Yee_FDTD_Curl_B_4th pMPI_fieldE01_2x pMPI_fieldB0_2x DELTAT)
+	 (MPI_Yee_FDTD_Curl_E_4th pMPI_fieldB0_2x pMPI_fieldE01_2x DELTAT)
+
+	 ;(MPI_YEE_CURL_R pMPI_fieldB0_2x pMPI_fieldE01_2x DELTAT)
+	 ;(MPI_RECT_YEE_CURL_L pMPI_fieldE01_2x pMPI_fieldB0_2x M_DELTA_Z M_DELTA_Y M_DELTA_X DELTAT)
+	 ;(MPI_YEE_CURL_R pMPI_fieldB0_2x pMPI_fieldE01_2x DELTAT)
+
+	 (blas_axpy_shrink_Field3D_MPI pMPI_fieldE pMPI_fieldE 1 pMPI_fieldE01_2x)
+	 (MPI_YEE_CURL_R ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldE) DELTAT)
+	 )
+       )
+     (CalBHaha .
+       (begin
+	 (blas_yisax_Field3D_MPI pMPI_fieldB pMPI_fieldB 1.0 pMPI_fieldB1)
+	 (MPI_Yee_FDTD_Curl_E_4th pMPI_fieldB1 pMPI_fieldE DELTAT)
+	 )
+       )
+     (PushPar . 
+       (begin
+	 (MPI_implicit_2nd_slab_rel ppis ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_FoutJ) pmass pchg (* DELTAT 1) 0 G_REL_SOLVE_ERR)
+
+	 )
+       )
+     (CalDEDT . (blas_axpy_enlarge_Field3D_MPI ("&" ppis->MPI_FoutJ) pMPI_fieldE01_2x -1 ("&" ppis->MPI_FoutJ)))
+     (CalE .  (MPI_Yee_FDTD_Curl_B_4th pMPI_fieldE01_2x pMPI_fieldB0_2x DELTAT))
+
+     (CalEHaha .  (MPI_Yee_FDTD_Curl_B_4th pMPI_fieldE pMPI_fieldB1 DELTAT))
+     ;(CalE .  (MPI_RECT_YEE_CURL_L pMPI_fieldE01_2x pMPI_fieldB0_2x M_DELTA_Z M_DELTA_Y M_DELTA_X DELTAT))
+     
+     )
+  ) 0)

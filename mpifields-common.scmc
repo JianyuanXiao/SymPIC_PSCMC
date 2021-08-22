@@ -1,0 +1,70 @@
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") (load "multi-array-pscmc.scmc") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(include< "assert.h")
+;(include- "c_/c_pscmc_inc.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include- "space_filling_curve.h")
+(include- "mpifields.h")
+(include- "dmshell.h")
+(define-scmc-global field-vars '((void* pe) (double delta_x) (double delta_y) (double delta_z) (long xlen) (long ylen) (long zlen) (long numvec) (int ovlp) (int num_ele) (int CD_type) (long x_num_thread_block) (long y_num_thread_block) (long z_num_thread_block) (long global_pid)))
+(define-scmc-global kernel-nonvec-vars '((long numvec) (long num_ele) (long xblock) (long yblock) (long zblock) (int ovlp)))
+(define-scmc-global field-vars-notype (map cadr field-vars))
+(define-scmc-global is-once-kernel?
+  (lambda (x)
+    (define vecx (list->vector (reverse (string->list (symbol->string x)))))
+    (and (eq? (vector-ref vecx 0) #\e) (eq? (vector-ref vecx 1) #\c)(eq? (vector-ref vecx 2) #\n))
+    ))
+(define-scmc-global is-all-in-one-kernel?
+  (lambda (x)
+    (define vecx (list->vector (reverse (string->list (symbol->string x)))))
+    (and (eq? (vector-ref vecx 0) #\e) (eq? (vector-ref vecx 1) #\n)(eq? (vector-ref vecx 2) #\o))
+    ))
+(define-scmc-global ovlp_kernels 
+  (apply append 
+    (map 
+      (lambda (x)
+	(list x (concat x '_once) (concat x '_all_in_one))
+	) 
+      '(merge_ovlp_m2o merge_ovlp_o2m sync_ovlp_m2o sync_ovlp_o2m))))
+(define-scmc-global mur_kernels (get-kernel-names "mur_abc.kernel.def.ss"))
+(define-scmc-global yee_abc_names '(yee_abc_ yee_pec_ yee_damp_ yee_setfix_))
+(input-scmc "fdtd_helper.scmc")
+(gen-kernel-set geo_yeefdtd ((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock)) "geo_yeefdtd.kernel.def.ss")
+(gen-kernel-set geo_yeefdtd_rect ((long y_cpu_core) (long numvec) (long XLEN) (long YLEN) (long ZLEN) (int ovlp) (long xblock) (long yblock) (long zblock)) "geo_yeefdtd_rect.kernel.def.ss")
+(gen-kernel-set yeefdtd_stencil defaults "stencil.kernel.def.ss")
+
+(defun get_pscmc_type_len size_t ((int num))
+  (getpscmctypebynum num)
+  )
+(eval-scmc-global 
+  (begin 
+    (define array-funs
+      (apply append 
+	(map 
+	  (lambda (krs) 
+	    (eval 
+	      `(gen-array-funs-maps ,krs ,(concat krs '_kernels)
+		 ,(if (eq? krs 'yeefdtd_stencil)
+		   '()
+		   '(xoffset yoffset zoffset)
+		   )
+		 (begin
+		   (define XLEN xlen)
+		   (define YLEN ylen)
+		   (define ZLEN zlen)
+		   (define-long y_cpu_core numvec)
+		   )
+		 (begin (sync_ovlp_mpi_field ,(if (eq? krs 'yeefdtd_stencil) 'inEB 'inB0)))
+		 ))
+	    ) 
+	  '(geo_yeefdtd geo_yeefdtd_rect yeefdtd_stencil))
+	)
+      )
+    '()
+    )
+  )

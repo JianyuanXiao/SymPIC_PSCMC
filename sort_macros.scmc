@@ -1,0 +1,54 @@
+
+(define-scmc-global NUM_CACHE_PAR 384)
+(define-scmc-global gen-low-load-sort-procedure 
+  (lambda (dir_num arr-head arr-load arr-cache-len lb rb xyzw-nums)
+    `(block
+       (define-int num_cur_load 0)
+       (define-int beg_to_left (/ (* 2 ,arr-cache-len) 5)) ;main cache is 40% the total cu_cache
+       ;(define-int beg_to_right (+ beg_to_left (/ (- ,arr-cache-len beg_to_left) 2)))
+       (define-int cur_to_left beg_to_left)
+       (define-int cur_to_right ,arr-cache-len)
+       (define-int cur_this 0)
+       (declare-int lg g)
+       (for lg=0 (< lg ,arr-load) (incf! lg ,NUM_ONE_CACHE_LEN)
+	 (define-long num_read (if (> (+ lg ,NUM_ONE_CACHE_LEN) ,arr-load) (- ,arr-load lg) ,NUM_ONE_CACHE_LEN))
+	 (GET_CONT_MEMORY (vrf local_pos_cache 0) (+ ,arr-head (* lg ,PARTICLE_LEN)) (* num_read ,PARTICLE_LEN))
+	 (for g=0 (< g num_read) g++
+	   (define gall (+ g lg))
+	   (cond
+	     ((< (vrf local_pos_cache g ,dir_num)  ,lb)
+	       ;(COPY_CONT_MEMORY (+ ,arr-head (* cur_to_left ,PARTICLE_LEN)) (+ ,arr-head (* gall ,PARTICLE_LEN)) ,PARTICLE_LEN)
+	       (PUT_CONT_MEMORY (+ ,arr-head (* cur_to_left ,PARTICLE_LEN)) (vrf local_pos_cache g) ,PARTICLE_LEN)
+	       (incf! cur_to_left)
+	       )
+	     ((> (vrf local_pos_cache g ,dir_num) ,rb)
+	       cur_to_right--
+	       ;(COPY_CONT_MEMORY (+ ,arr-head (* cur_to_right ,PARTICLE_LEN)) (+ ,arr-head (* gall ,PARTICLE_LEN)) ,PARTICLE_LEN)
+	       (PUT_CONT_MEMORY (+ ,arr-head (* cur_to_right ,PARTICLE_LEN)) (vrf local_pos_cache g) ,PARTICLE_LEN)
+	       )
+	     (else
+	       ;(COPY_CONT_MEMORY (+ ,arr-head (* cur_this ,PARTICLE_LEN)) (+ ,arr-head (* gall ,PARTICLE_LEN)) ,PARTICLE_LEN)
+	       (PUT_CONT_MEMORY (+ ,arr-head (* cur_this ,PARTICLE_LEN)) (vrf local_pos_cache g) ,PARTICLE_LEN)
+	       (incf! cur_this)
+	       )
+	     )
+	   )
+	 )
+       (vector-set! ,xyzw-nums 0 cur_this)
+       (vector-set! ,xyzw-nums 1 beg_to_left)
+       (vector-set! ,xyzw-nums 2 cur_to_left)
+       (vector-set! ,xyzw-nums 3 cur_to_right)
+       )
+    ))
+
+(defmacro gen-copy-main-data (gid-loc)
+  ;(COPY_SPARSE_MEMORY (+ ,grid_particle_mem_loc (* num_write_main ,PARTICLE_LEN)) (+ ,grid_particle_mem_loc (* (+ g lg) ,PARTICLE_LEN)) 1 ,PARTICLE_LEN ,PARTICLE_LEN ,PARTICLE_LEN put_sync_id)
+  `(begin 
+    ;(COPY_CONT_MEMORY (+ ,gid-loc (* num_write_main ,PARTICLE_LEN)) (+ ,gid-loc (* (- (+ g lg) num_write_tmp) ,PARTICLE_LEN)) (* num_write_tmp ,PARTICLE_LEN))
+    (PUT_CONT_MEMORY (+ ,gid-loc (* num_write_main ,PARTICLE_LEN)) (vrf local_pos_cache (- g num_write_tmp)) (* num_write_tmp ,PARTICLE_LEN) put_sync_id)
+    (incf! num_write_main num_write_tmp)
+    (set! num_write_tmp 0)
+    )
+
+  )
+(define-scmc-global num-xlen-gpu 32) ;FOR GCN/CDNA GPUs, this should be set to 64

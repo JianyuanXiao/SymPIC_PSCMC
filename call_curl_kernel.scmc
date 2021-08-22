@@ -1,0 +1,127 @@
+;paravec.scmc general_macros.scmc
+
+(eval-scmc-global (begin (load "pscmc_config_runtime.ss") '()))
+(include< "stdio.h")
+(include< "stdlib.h")
+(include< "string.h")
+(include< "assert.h")
+;(include- "c_/c_pscmc_inc.h")
+(input-scmc "paravec.scmc")
+(input-scmc "general_macros.scmc")
+(input-all-pscmc-struct)
+(input-all-kernel-and-rt)
+(include- "space_filling_curve.h")
+(include- "mpifields.h")
+
+;(include- "cfgcst.h")
+
+(define-scmc-global fdtd_kernels 
+  (append 
+    (map (lambda (x) (multi-concat 'Yee_FDTD_Curl_ x)) '(E B E_4th B_4th))
+    (apply append (map (lambda (x) (map (lambda (y) (multi-concat 'Yee_FDTD_ x y)) '(FWD BWD FWD_4th BWD_4th))) '(Grad_ Curl_ Div_)))
+    ))
+(eval-scmc-global
+(begin-map
+  (lambda (name)
+    `(defun-class-Field3D_MPI ,(multi-concat 'MPI_ name) int ((Field3D_MPI* inEB) (double DT))
+       (define i 0)
+       ;(sync_ovlp_mpi_field pthis)
+       (sync_ovlp_mpi_field inEB)
+       (for i=0 (< i num_runtime) i++ 
+	 (define data0 data)
+	 (class-header-Field3D_MPI inEB)
+	 (,(multi-concat 'Field3D_Seq_ name) (+ data0 i) (+ data i) DT))
+       (return 0)
+       )
+    )
+  fdtd_kernels
+  ))
+(defun-class-Field3D_MPI MPI_merge_current_2 int ((Field3D_MPI* inEB))
+  (define i 0)
+  ;(sync_ovlp_mpi_field pthis)
+  ;(sync_ovlp_mpi_field inEB)
+  (for i=0 (< i num_runtime) i++ 
+    (define data0 data)
+    (class-header-Field3D_MPI inEB)
+    (Field3D_Seq_merge_current_2 (+ data0 i) (+ data i)))
+  (return 0)
+  )
+(defun-class-Field3D_MPI MPI_merge_current int ((Field3D_MPI* inEB))
+  (define i 0)
+  ;(sync_ovlp_mpi_field pthis)
+  ;(sync_ovlp_mpi_field inEB)
+  (for i=0 (< i num_runtime) i++ 
+    (define data0 data)
+    (class-header-Field3D_MPI inEB)
+    (Field3D_Seq_merge_current (+ data0 i) (+ data i)))
+  (return 0)
+  )
+(eval-scmc-global 
+  `(defun-class-Field3D_MPI MPI_Yee_FDTD_MUR_ABC int ((Field3D_MPI* inEB) (double DT) (int use_abc) (int use_pec) (int use_damp) (int use_fixb))
+     ;(sync_ovlp_mpi_field pthis)
+     (sync_ovlp_mpi_field inEB)
+     ;(LOG_RECORD_INFO "%d %e\n" dir DT)
+     ,(begin-map
+	(lambda (ps pfx)
+	  `(cond .
+	     ,(append 
+		(let loop ((dirs '("" x y xy z xz yz xyz)) (n 0))
+		  (cond
+		    ((null? dirs) '((else 0)))
+		    (else
+		      (define dir (car dirs))
+		      (cons
+			`((== ,ps ,n) 
+			   (,(multi-concat pfx dir) pthis inEB DT)
+			   )
+			(loop (cdr dirs) (+ n 1)))
+		      )
+		    )
+		  )
+		)
+	     )
+	  )
+	'(use_pec use_abc use_damp use_fixb) '(Field3D_MPI_yee_pec_ Field3D_MPI_yee_abc_ Field3D_MPI_yee_damp_ Field3D_MPI_yee_setfix_)
+	)
+     (return 0)
+     )
+  )
+
+(eval-scmc-global
+  (begin-map
+    (lambda (name)
+      `(defun-class-Field3D_MPI ,(concat 'MPI_PML_FDTD_CURL_ name) int ((Field3D_MPI* inEB) (Field3D_MPI* outPMLEB) (Field3D_MPI* inPMLEB) (double DT) (double m) (double q) (double DX) (double DY) (double DZ) (int abc_dir) (int level) (int pml_m) (double max_sigma) (long allxmax) (long allymax) (long allzmax))
+	 (define i 0)
+	 (sync_ovlp_mpi_field inEB)
+	 (sync_ovlp_mpi_field inPMLEB)
+	 (for i=0 (< i num_runtime) i++
+	   (define data0 data)
+	   (class-header-Field3D_MPI inEB)
+	   (,(concat 'Field3D_Seq_PML_FDTD_CURL_ name) (+ data0 i) (+ data i) (+ (structp-ref outPMLEB data) i) (+ (structp-ref inPMLEB data) i) DT m q DX DY DZ abc_dir level pml_m max_sigma allxmax allymax allzmax)
+	   )
+	 )     
+      )
+    '(FWD BWD)
+    )
+  )
+
+(defun-class-Field3D_MPI MPI_kgm_calc_rho int ((Field3D_MPI* inEB) (double DT) (double m) (double Q) (double DX) (double refz0) (double q) (double dtodx) (int mode) (int swap_input))
+  (define i 0)
+  (sync_ovlp_mpi_field inEB)
+  (for i=0 (< i num_runtime) i++ 
+    (define data0 data)
+    (class-header-Field3D_MPI inEB)
+    (Field3D_Seq_kgm_calc_rho (+ data0 i) (+ data i) DT m Q DX refz0 q dtodx mode swap_input) 
+    )
+  (return 0)
+  )
+(defun-class-Field3D_MPI MPI_kgm_eqn_core int ((Field3D_MPI* inEB) (Field3D_MPI* pextA0) (Field3D_MPI* pextA1) (double DT) (double m) (double Q) (double DX) (double extg) (double refz0) (double g_beg) (int swap_input))
+  (define i 0)
+  (sync_ovlp_mpi_field inEB)
+  (for i=0 (< i num_runtime) i++ 
+    (define data0 data)
+    (class-header-Field3D_MPI inEB)
+    (Field3D_Seq_kgm_eqn_core (+ data0 i) (+ data i) (+ (structp-ref pextA0 data) i) (+ (structp-ref pextA1 data) i) DT m Q DX extg refz0 g_beg swap_input) 
+    )
+  (return 0)
+  )

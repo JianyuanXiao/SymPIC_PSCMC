@@ -1,0 +1,19 @@
+
+(input-include "local_header.h")
+(input-scmc "../general_macros.scmc")
+(input-scmc "../gen_discrete_operators.scmc")
+(eval-scmc-global 
+  (begin (load "../dm8x8scheme.ss")
+    (load "../multi-map.ss")
+    (load "../dmmacros.scmc")
+    (gen_012_corefun_simplified
+      `(
+	 (dm_8x8_eqn_psi dphi_dt_out blk_offset_phi num_ele_phi 0 0 16)
+	 (dm_8x8_eqn_J Y1 blk_offset_A num_ele_A 0 16 3)
+	 (dm_8x8_eqn_psi_m dphi_dt_out blk_offset_phi num_ele_phi 0 19 16)
+	 (dm_8x8_cal_H Y1 blk_offset_A num_ele_A 0 35 1)
+	 )
+      8
+      )
+    )) 
+
