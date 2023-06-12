@@ -3,6 +3,9 @@
 (define-scmc-global LOG_LEVEL_PRE 3)
 (define-scmc-global USE_VEC #t)
 ;(define-scmc-global IMP_IDX_OPT_MAX 8)
+(defmacro comment str-s
+  `(pure-text ,(apply multi-concat (cons "\n//" (append str-s (list "\n")))))
+  )
 (defmacro fffor_xyz_from_to (xmi ymi zmi xma yma zma . body)
   `(fffor_from_to xyzx xyzy xyzz ,xmi ,ymi ,zmi ,xma ,yma ,zma . ,body)
   )
@@ -551,6 +554,7 @@
 	   (define core-var (map (lambda (x) (car (reverse x))) var))
 	   `(begin
 	      (defun-class-Field3D_MPI ,(multi-concat 'Field3D_MPI_ prefix kername) int ,mpi-var-type
+	     (comment "Generate MPI version of kernel function " ,kername)
 		(for-from-to i 0 num_runtime 
 		  (,(multi-concat 'Field3D_Seq_ prefix kername) (+ data i) . ,mpi-var)
 		  )
@@ -594,12 +598,14 @@
 	(define core-var (map (lambda (x) (car (reverse x))) var))
 	`(begin
 	   (defun-class-Field3D_Seq ,(multi-concat 'Field3D_Seq_ prefix kername) int ,var
+	     (comment "Generate choosing runtime of " ,kername)
 	      (choose_the_runtime (,(multi-concat 'Field3D_Seq_ kername) pthis . ,core-var))
 	      (return 0)
 	      )
 	   ,(begin-map 
 	      (lambda (rt) 
 		`(defun-class-Field3D_Seq ,(multi-concat rt 'Field3D_Seq_ kername) int ,var
+	     (comment "Generate one runtime version of " ,kername)
 		   ,(pre_exec rt kername ker_structp)
 		   ,(with-kernel-parameters rt kername kpara ker_structp 
 		      `(,(multi-concat rt kername '_exec) ,ker_structp (,(multi-concat rt kername '_get_xlen)) numvec)

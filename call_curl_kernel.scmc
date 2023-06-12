@@ -97,6 +97,7 @@
 	 (for i=0 (< i num_runtime) i++
 	   (define data0 data)
 	   (class-header-Field3D_MPI inEB)
+	   (comment "Run each runtime")
 	   (,(concat 'Field3D_Seq_PML_FDTD_CURL_ name) (+ data0 i) (+ data i) (+ (structp-ref outPMLEB data) i) (+ (structp-ref inPMLEB data) i) DT m q DX DY DZ abc_dir level pml_m max_sigma allxmax allymax allzmax)
 	   )
 	 )     

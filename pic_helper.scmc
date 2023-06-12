@@ -40,6 +40,7 @@
     ;(write fix-vars current-error-port) (newline current-error-port)
     `(begin
        (defun-class-One_Particle_Collection ,(multi-concat rt 'One_Particle_Collection_ ker-name) int ,(append allargs '((int SPEC) (int NUM_SPEC)))
+	 (comment "Generate one runtime one species version of " ker-name)
 	 ,(call-fun-args-pfx)
 	 ,(begin-map
 	    (lambda (x)
@@ -112,6 +113,7 @@
 	 )
        (defun-class-Particle_in_Cell_MPI ,(multi-concat 'MPI_ ker-name) int ,mpi-allargs
 	 (define i 0)
+	 (comment "Generate MPI version of " ker-name)
 	 ,(call-fun-args-mpi-pfx)
 	 (define-int num_spec (struct-ref MPI_fieldE num_spec))
 	 (define-int num_runtime (struct-ref MPI_fieldE num_runtime))

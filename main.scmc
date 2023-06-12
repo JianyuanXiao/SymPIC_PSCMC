@@ -1347,16 +1347,21 @@
 			     )
 			   )
 			 (else
+			   (comment "set B1=B")
 			   (blas_yisax_Field3D_MPI ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldB1) 1.0 ("&" ppis->MPI_fieldB))
+			   (comment "PML or not")
 			   (if G_USE_PML_ABC_DIR
 			     (begin
 			       (class-header-Particle_in_Cell_MPI ppis)
 			       (class-header-Field3D_Seq (struct-ref MPI_fieldE data))
 			       (sync_ovlp_mpi_field ("&" ppis->MPI_fieldPMLE))
+			       (comment "Push PML version of FDTD dB/dt solver")
 			       (MPI_PML_FDTD_CURL_FWD ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldPMLB) ("&" ppis->MPI_fieldPMLE) DELTAT 0 0 delta_x delta_y delta_z G_USE_PML_ABC_DIR G_PML_LEVEL 3 G_PML_SIGMA_MAX allxmax allymax allzmax) 
 			       )
 			     ;(MPI_Yee_FDTD_Curl_E ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldE) DELTAT))
-			     (MPI_YEE_CURL_R ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldE) DELTAT))
+			     (begin
+			       (comment "Push normal version of FDTD dB/dt solver")
+			     (MPI_YEE_CURL_R ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldE) DELTAT)))
 			   (if G_USE_FIXB_DIR
 			     (MPI_Yee_FDTD_MUR_ABC ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldB) DELTAT 0 0 0 G_USE_FIXB_DIR)
 			     )
@@ -1413,6 +1418,7 @@
 			       (define-Field3D_MPI* pMPI_fieldB ("&" MPI_fieldB))
 			       (define-double curt (wclk_now))
 			       ;(if 1 (block (define-FILE* fp (fopen "dbg00" "wb")) (dump_particles ("&" ppis->MPI_fieldE) fp) (fclose fp)))
+			       (comment "Push particle, use vlo version if USE_VLO is set to 1")
 			       (if M_USE_VLO
 				 (MPI_geo_nr_Bfield_pushJ_vlo ppis pMPI_fieldE pMPI_fieldB ("&" MPI_fieldB1) pMPI_FoutJ pmass pchg (* 0.5 DELTAT) T_TORI_X0 0 0 0 0 0)
 				 (MPI_geo_nr_Bfield_pushJ ppis pMPI_fieldE pMPI_fieldB ("&" MPI_fieldB1) pMPI_FoutJ pmass pchg (* 0.5 DELTAT) T_TORI_X0 0 0 0 0 0)
@@ -1469,17 +1475,21 @@
 		       ;(if 0 (begin (set! fp (fopen "dbg01" "wb")) (dump_particles ("&" ppis->MPI_fieldE) fp) (fclose fp) (exit 0)))
 		       (PERFORMANCE_TIME "merge_current/relng/geo_rel")
 		       ;(dump_particles ("&" ppis->MPI_fieldE) stderr)
+		       (comment "sort particle if it is the sort time-step")
 		       (if (eq? (remainder t num_multi_step_sort) 0)
 			 (begin
+			   (comment "sort x direction")
 			   (call_particle_sort_mpi ppis 0 0)
 			   (PERFORMANCE_TIME "sort x particle")
 			   ;(LOG_RECORD_INFO "bef 0\n")
 			   ;(exit 0)
 			   ;(dump_particles ("&" ppis->MPI_fieldE) stderr)
+			   (comment "sort y direction")
 			   (call_particle_sort_mpi ppis 1 0)
 			   (PERFORMANCE_TIME "sort y particle")
 			   ;(LOG_RECORD_INFO "bef 2\n")
 			   ;(dump_particles ("&" ppis->MPI_fieldE) stderr)
+			   (comment "sort z direction")
 			   (call_particle_sort_mpi ppis 2 0)
 			   ;(LOG_RECORD_INFO "aft 2\n")
 			   ;(dump_particles ("&" ppis->MPI_fieldE) stderr)
@@ -1505,6 +1515,7 @@
 			       (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB) 1 ("&" ppis->MPI_fieldBtmp1))
 			       )
 			     )
+			   (comment "add current to Electric field E")
 			   (blas_axpy_Field3D_MPI ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldE) -1 ("&" ppis->MPI_FoutJ))
 			   (PERFORMANCE_TIME "CAL DEDT=-J")
 			   (if USE_NP_BOUNDARY
@@ -1521,7 +1532,9 @@
 			       (blas_yisax_Field3D_MPI pMPI_fieldEtmp pMPI_fieldEtmp 1. pMPI_fieldE)
 			       (if USE_TORI
 				 ;(MPI_GEO_YEE_CURL_L ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) T_TORI_X0 DELTAT)
-				 (MPI_GEO_YEE_CURL_L ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) T_TORI_X0 M_DELTA_X M_DELTA_Y M_DELTA_Z DELTAT)
+				 (begin
+				   (comment "Use tori version of FDTD dE/dt")
+				   (MPI_GEO_YEE_CURL_L ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) T_TORI_X0 M_DELTA_X M_DELTA_Y M_DELTA_Z DELTAT))
 				 ;(MPI_Yee_FDTD_Curl_B ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) DELTAT)
 				 (if G_USE_PML_ABC_DIR
 				   (begin
@@ -1529,15 +1542,20 @@
 				     ;(class-header-Field3D_Seq pMPI_fieldE->data)
 				     (class-header-Field3D_Seq (struct-ref MPI_fieldE data))
 				     (sync_ovlp_mpi_field ("&" ppis->MPI_fieldPMLB))
+				     (comment "Use PML version of FDTD dE/dt")
 				     (MPI_PML_FDTD_CURL_BWD ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) ("&" ppis->MPI_fieldPMLE) ("&" ppis->MPI_fieldPMLB) DELTAT 0 0 delta_x delta_y delta_z G_USE_PML_ABC_DIR G_PML_LEVEL 3 G_PML_SIGMA_MAX allxmax allymax allzmax) 
 				     )
-				   (MPI_RECT_YEE_CURL_L ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) M_DELTA_Z M_DELTA_Y M_DELTA_X DELTAT))
+				   (begin
+				     (comment "Otherwise use normal version of FDTD dE/dt")
+				   (MPI_RECT_YEE_CURL_L ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) M_DELTA_Z M_DELTA_Y M_DELTA_X DELTAT)))
 				 )
 			       (PERFORMANCE_TIME "CURLB")
+			       (comment "Apply Mur absorbing bondary condition")
 			       (MPI_Yee_FDTD_MUR_ABC pMPI_fieldE pMPI_fieldEtmp DELTAT G_USE_ABC_DIR G_USE_PEC_DIR G_USE_DAMP_DIR 0)
 			       (PERFORMANCE_TIME "MURABC")
 			       )
 			     (begin 
+			       (comment "Following are corresponding non-NP bondary condition version of FDTD dE/dt")
 			       (if USE_TORI
 				 (MPI_GEO_YEE_CURL_L ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) T_TORI_X0 M_DELTA_X M_DELTA_Y M_DELTA_Z DELTAT)
 				 ;(MPI_Yee_FDTD_Curl_B ("&" ppis->MPI_fieldE) ("&" ppis->MPI_fieldB1) DELTAT)
@@ -1553,6 +1571,7 @@
 				 )
 			       (PERFORMANCE_TIME "CURLB"))
 			     )
+			   (comment "set B=B1")
 			   (blas_yisax_Field3D_MPI ("&" ppis->MPI_fieldB) ("&" ppis->MPI_fieldB) 1 ("&" ppis->MPI_fieldB1))))
 		       )
 		     (G_USE_BORIS_YEE

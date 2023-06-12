@@ -160,6 +160,7 @@
 	    (set! rt (car rt))
 	    `(begin
 	       (defun-class-Field3D_Seq ,(multi-concat rt newname) int ((int is_init_kernels))
+		 (comment "Generate one runtime alloc field function " newname)
 		 (if is_init_kernels
 		   ,(begin-map (lambda (x) ((car x) rt)) array-funs))
 		 (return 0)
@@ -167,6 +168,7 @@
 	       ,(begin-map (lambda (x) ((cadr x) rt)) array-funs))
 	    ) runtimes)
        (defun-class-Field3D_Seq ,newname int ((int is_init_kernels))
+		 (comment "Generate choose runtime alloc field function " newname)
 	 (choose_the_runtime (,newname pthis is_init_kernels))
 	 (return 0)
 	 )
